@@ -106,7 +106,7 @@ def start_bot():
     post_news()
 
 # ⏰ Planification toutes les 30 minutes
-schedule.every(30).minutes.do(start_bot)
+schedule.every(1).minutes.do(start_bot)
 
 print("🤖 Bot football lancé...")
 

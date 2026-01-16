@@ -16,23 +16,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules, ex: @channel1,@channel2
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-# Flux RSS francophones
+# Flux RSS francophones (Seulement Lequipe et Footmercato)
 RSS_FEEDS = [
     "https://www.lequipe.fr/rss/actu_rss_Football.xml",
-    "https://rmcsport.bfmtv.com/rss/football/",
-    "https://www.eurosport.fr/football/rss.xml",
-    "https://www.20minutes.fr/sport/football/rss",
-    "https://www.leparisien.fr/sports/football/rss.xml",
-    "https://www.lefigaro.fr/sports/football/rss.xml",
-    "https://www.footmercato.net/rss",
-    "https://www.maxifoot.fr/rss.xml",
-    "https://www.foot01.com/rss/football.xml",
-    "https://www.france24.com/fr/sports/football/rss",
-    "https://www.tf1info.fr/football/rss.xml",
-    "https://www.bfmtv.com/rss/sports/football/",
-    "https://www.ouest-france.fr/sport/football/rss.xml",
-    "https://www.lavoixdunord.fr/sports/football/rss",
-    "https://www.cahiersdufootball.net/rss.xml",
+    "https://www.footmercato.net/rss"
 ]
 
 POSTED_FILE = "posted.json"
@@ -46,37 +33,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Emojis
+# Emojis et phrases
 EMOJI_CATEGORIES = {
     'match': ['⚽', '🏆', '🆚', '🥅', '👕'],
     'transfert': ['🔄', '✍️', '📝', '💼', '💰'],
     'blessure': ['🤕', '🏥', '⚠️', '😔'],
     'championnat': ['🏅', '⭐', '👑', '🥇'],
-    'coupe': ['🏆', '🥇', '🎖️'],
-    'entraineur': ['👔', '📋', '🗣️'],
-    'arbitrage': ['👨‍⚖️', '🟨', '🟥', '⏱️'],
-    'jeune': ['🌟', '👶', '💫'],
-    'contrat': ['📜', '💵', '✍️'],
     'general': ['📰', '🔥', '🚀', '💥']
 }
 
 PHRASES_ACCROCHE = {
-    'exclusif': ["🚨 EXCLUSIF : ", "🎯 INFO EXCLUSIVE : ", "🔴 EXCLU TF1 : "],
-    'breaking': ["🔥 BREAKING : ", "⚡ FLASH INFO : ", "💥 URGENT : "],
-    'analyse': ["📊 ANALYSE : ", "🧠 DÉCRYPTAGE : ", "🔍 ENQUÊTE : "],
-    'interview': ["🎤 INTERVIEW : ", "🗣️ TÉMOIGNAGE : ", "💬 CONFÉRENCE : "],
-    'resultat': ["📈 RÉSULTAT : ", "🏁 FINAL : ", "✅ BILAN : "],
-    'annonce': ["📢 ANNONCE : ", "🎊 RÉVÉLATION : ", "💎 SORTIE : "],
     'general': ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVELLE : "]
 }
 
-HASHTAGS_FR = [
-    "#Foot", "#Football", "#Ligue1", "#LigueDesChampions", "#CoupeDeFrance",
-    "#PSG", "#OM", "#OL", "#LOSC", "#ASM", "#SRFC", "#FRA", "#TeamFrance",
-    "#Mercato", "#Transfert", "#BallonDor", "#UEFA", "#ChampionsLeague"
-]
+HASHTAGS_FR = ["#Foot", "#Football", "#Ligue1", "#LigueDesChampions", "#Mercato"]
 
-# Initialisation bot
+# Bot
 bot = Bot(token=BOT_TOKEN)
 
 # ---------------- POSTÉ ----------------
@@ -121,82 +93,105 @@ def escape_markdown(text: str) -> str:
 # ---------------- ANALYSE ----------------
 def analyze_content(title, summary):
     text = f"{title} {summary}".lower()
-    keywords = {
-        'match': ['match', 'rencontre', 'score', 'but', 'victoire', 'défaite', 'nul'],
-        'transfert': ['transfert', 'mercato', 'signature', 'arrivée', 'départ', 'contrat'],
-        'blessure': ['blessure', 'blessé', 'indisponible', 'absent'],
-        'championnat': ['championnat', 'ligue 1', 'classement', 'champion'],
-        'coupe': ['coupe', 'finale', 'trophée'],
-        'entraineur': ['entraîneur', 'coach', 'staff'],
-        'arbitrage': ['arbitre', 'carton', 'var', 'penalty'],
-        'jeune': ['jeune', 'espoir', 'formation'],
-        'contrat': ['prolongation', 'résiliation', 'accord'],
-        'exclusif': ['exclu', 'exclusive', 'révélation', 'scoop'],
-        'breaking': ['breaking', 'urgence', 'immédiat', 'flash']
-    }
-    scores = {cat: 0 for cat in keywords}
-    for cat, words in keywords.items():
-        for w in words:
-            if w in text: scores[cat] += 1
-    main_category = max(scores, key=scores.get)
-    if scores[main_category] == 0:
-        main_category = 'general'
-    sub_categories = [cat for cat, score in scores.items() if score > 0][:3]
-    return main_category, sub_categories
+    if any(word in text for word in ["match", "score", "but"]):
+        return 'match'
+    if any(word in text for word in ["transfert", "mercato"]):
+        return 'transfert'
+    if any(word in text for word in ["blessure", "indisponible"]):
+        return 'blessure'
+    return 'general'
 
 def generate_enriched_content(title, summary, source):
-    main_cat, sub_cats = analyze_content(title, summary)
+    main_cat = analyze_content(title, summary)
     clean_summary = clean_text(summary)
     clean_title = clean_text(title, max_len=80)
     accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
-    emojis = []
-    for cat in [main_cat] + sub_cats[:2]:
-        if cat in EMOJI_CATEGORIES:
-            emojis.append(random.choice(EMOJI_CATEGORIES[cat]))
-    emojis = list(dict.fromkeys(emojis)) or ['⚽','📰']
-    if len(clean_summary) > 300:
-        formatted_summary = f"{clean_summary[:200]}...\n\n💡 {clean_summary[-100:]}"
-    else:
-        formatted_summary = clean_summary
+    emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
     hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
     source_name = source or "Média"
-    message = f"{''.join(emojis)} {accroche}*{clean_title}*\n\n{formatted_summary}\n\n📰 *Source :* {source_name}\n🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n📊 *Catégorie :* {main_cat.upper()}\n\n{hashtags}"
+    message = (
+        f"{''.join(emojis)} {accroche}*{clean_title}*\n\n"
+        f"{clean_summary}\n\n"
+        f"📰 *Source :* {source_name}\n"
+        f"🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n"
+        f"📊 *Catégorie :* {main_cat.upper()}\n\n"
+        f"{hashtags}"
+    )
     return escape_markdown(message)
 
 # ---------------- POST NEWS ----------------
 async def post_to_channels(photo_url, message, button_url=None):
-    keyboard = None
-    if button_url:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Rejoindre le canal", url=button_url)]])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Lire l'article", url=button_url)]]) if button_url else None
     for channel in CHANNELS:
         try:
-            await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+            if photo_url:
+                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+            else:
+                await bot.send_message(chat_id=channel, text=message, parse_mode="MarkdownV2", reply_markup=keyboard)
             logger.info(f"✅ Publié sur {channel}")
         except TelegramError as e:
             logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(5,10))
+        await asyncio.sleep(random.randint(3,6))
+
+# ---------------- RSS SCHEDULER ----------------
+async def rss_scheduler():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for feed_url in RSS_FEEDS:
+                try:
+                    async with session.get(feed_url) as resp:
+                        content = await resp.text()
+                        feed = feedparser.parse(content)
+                        for entry in feed.entries:
+                            link = entry.get('link')
+                            if not link or link in posted_links:
+                                continue
+                            title = entry.get('title', '')
+                            summary = entry.get('summary', '') or entry.get('description', '')
+                            # Image extraction
+                            img_url = None
+                            if 'media_content' in entry:
+                                img_url = entry.media_content[0].get('url')
+                            elif 'media_thumbnail' in entry:
+                                img_url = entry.media_thumbnail[0].get('url')
+                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
+                            await post_to_channels(img_url, msg, button_url=link)
+                            posted_links.add(link)
+                            save_posted_links()
+                            await asyncio.sleep(random.randint(5,10))
+                except Exception as e:
+                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
+            await asyncio.sleep(900)  # Toutes les 15 minutes
 
 # ---------------- PROMO ----------------
-PROMO_MESSAGE = "🚫 Arrêté d'acheter les C0UP0NS qui vont perdre tous le temps🚫, un bon pronostiqueur ne vend rien si effectivement il gagne✅, Venez prendre les C0UP0NS GRATUITEMENT✅ tout les jours dans ce CANAL TELEGRAM🌐 fiable à 90%\n\n🔵Lien du CANAL : https://t.me/mrxpronosfr"
+PROMO_MESSAGE = (
+    "🚫 Arrêté d'acheter les C0UP0NS qui vont perdre tous le temps🚫, "
+    "un bon pronostiqueur ne vend rien si effectivement il gagne✅, "
+    "Venez prendre les C0UP0NS GRATUITEMENT✅ tout les jours dans ce CANAL TELEGRAM🌐 fiable à 90%\n\n"
+    "🔵Lien du CANAL : https://t.me/mrxpronosfr"
+)
 
 async def send_promo():
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Rejoindre le canal", url="https://t.me/mrxpronosfr")]])
     for channel in CHANNELS:
         try:
             await bot.send_message(chat_id=channel, text=escape_markdown(PROMO_MESSAGE), parse_mode="MarkdownV2", reply_markup=keyboard)
-            logger.info(f"📢 Envoi message promotionnel à {channel}")
+            logger.info(f"📢 Envoi message promo à {channel}")
         except TelegramError as e:
             logger.error(f"❌ Erreur promo {channel}: {e}")
 
-# ---------------- SCHEDULER ----------------
 async def promo_scheduler():
     while True:
-        await send_promo()  # Premier envoi
-        await asyncio.sleep(12*60*60)  # 12h → 2x/jour
+        await send_promo()
+        await asyncio.sleep(12*60*60)  # 12h
 
+# ---------------- MAIN ----------------
 async def main():
     logger.info("🤖 Bot Football + Promo démarré")
-    await promo_scheduler()  # Lancement du promo scheduler
+    await asyncio.gather(
+        rss_scheduler(),
+        promo_scheduler()
+    )
 
 if __name__ == "__main__":
     if not BOT_TOKEN or not CHANNELS:

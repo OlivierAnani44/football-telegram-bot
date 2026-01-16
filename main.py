@@ -20,7 +20,7 @@ RSS_FEEDS = [
 ]
 
 POSTED_FILE = "posted.json"
-DEFAULT_IMAGE = "https://i.imgur.com/7vQKX0l.png"
+DEFAULT_IMAGE = "https://i.imgur.com/7vQKX0l.png"  # image par défaut si RSS n'en fournit pas
 
 # ⚙️ Initialisation bot et logging
 bot = Bot(token=BOT_TOKEN)
@@ -59,6 +59,74 @@ def escape_markdown(text):
 async def rewrite_article(text):
     # Supprimer les liens
     text_no_links = re.sub(r'http\S+', '', text)
-    prompt = (
-        f"Réécris ce texte en français pour Telegram de manière dynamique et accrocheuse. "
-        f"Utilise des phrases courtes, des emoj
+
+    # Prompt stable pour éviter les erreurs de f-string
+    prompt = f"""Réécris ce texte en français pour Telegram de manière dynamique et accrocheuse.
+Utilise des phrases courtes, des emojis football ⚽🔥📰, et rends-le captivant.
+Ne mets aucun lien.
+
+{text_no_links}"""
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300
+        )
+        rewritten = response['choices'][0]['message']['content'].strip()
+        return rewritten
+    except Exception as e:
+        logging.error(f"Erreur IA : {e}")
+        return text_no_links[:300] + "..."
+
+# 📰 Publication des news immédiatement dès qu'elles sont nouvelles
+async def check_and_post_news():
+    new_posts = 0
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries[:5]:  # prendre quelques derniers articles
+            if entry.link in posted_links:
+                continue
+
+            # Réécriture de l'article
+            summary = await rewrite_article(entry.summary)
+            title = escape_markdown(entry.title)
+            summary = escape_markdown(summary)
+
+            message = f"""⚽ *ACTUALITÉ FOOTBALL*\n
+🔥 *{title}*\n
+📰 {summary}"""
+
+            image_url = get_image(entry)
+
+            try:
+                await bot.send_photo(
+                    chat_id=CHANNEL_ID,
+                    photo=image_url,
+                    caption=message,
+                    parse_mode="MarkdownV2"
+                )
+                posted_links.add(entry.link)
+                save_posted_links()
+                new_posts += 1
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                logging.error(f"Erreur lors de l'envoi du post : {e}")
+
+    if new_posts:
+        print(f"✅ {new_posts} nouvel(le)(s) article(s) publié(s).")
+    else:
+        print("⏱ Aucun nouvel article pour l'instant.")
+
+# 🔁 Boucle de vérification en continu (toutes les 1 minute)
+async def scheduler():
+    while True:
+        await check_and_post_news()
+        await asyncio.sleep(60)  # vérifie toutes les minutes
+
+# 🏁 Lancement
+if __name__ == "__main__":
+    print("🤖 Bot football avec IA et publication instantanée lancé...")
+    asyncio.run(scheduler())
+

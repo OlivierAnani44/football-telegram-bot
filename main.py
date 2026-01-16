@@ -9,7 +9,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-SOURCE_CHANNEL = "@ActuFootZoneFr"
+SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
 CHANNELS = os.getenv("CHANNELS")  # Liste de canaux séparés par des virgules
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 

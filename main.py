@@ -1,82 +1,219 @@
-import asyncio
-import aiohttp
 import os
+import feedparser
+import json
+import asyncio
+import logging
+import re
+import random
+import hashlib
+from datetime import datetime
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from bs4 import BeautifulSoup
-from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-CHECK_INTERVAL = 900  # 15 minutes
-SOURCE_URL = "https://www.footmercato.net/actualite-a-la-une"
-POSTED_FILE = "posted.txt"
-# ==========================================
+CHANNEL_IDS = [c.strip() for c in os.getenv("CHANNEL_IDS", "").split(",") if c.strip()]
+
+POSTED_FILE = "posted.json"
+MAX_POSTED = 2500
+DEFAULT_IMAGE = "https://i.imgur.com/8YqG4xk.jpg"
+
+PROMO_CHANNEL_URL = "https://t.me/mrxpronosfr"
+
+PROMO_MESSAGE = """🚫 Arrêté d'acheter les C0UP0NS qui vont perdre tous le temps 🚫
+
+Un bon pronostiqueur ne vend rien s’il gagne vraiment ✅  
+Venez prendre les C0UP0NS GRATUITEMENT ✅ tous les jours dans ce CANAL TELEGRAM 🌐  
+Fiable à 90%
+"""
+
+RSS_FEEDS = [
+    "https://www.lequipe.fr/rss/actu_rss_Football.xml",
+    "https://rmcsport.bfmtv.com/rss/football/",
+    "https://www.eurosport.fr/football/rss.xml",
+    "https://www.footmercato.net/rss",
+    "https://www.maxifoot.fr/rss.xml",
+    "https://www.leparisien.fr/sports/football/rss.xml",
+    "https://www.france24.com/fr/sports/football/rss",
+]
+
+# ================= LOGGING =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("FootballBot")
 
 bot = Bot(token=BOT_TOKEN)
 
-# ---------- Gestion des articles déjà publiés ----------
+# ================= UTILS =================
+def escape_md(text):
+    return re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', text or "")
+
+def clean_text(text, max_len=500):
+    text = re.sub(r'<[^>]+>', '', text or "")
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return text
+
+def hash_article(title, link):
+    return hashlib.md5(f"{title}{link}".encode()).hexdigest()
+
+# ================= STORAGE =================
 def load_posted():
-    if not os.path.exists(POSTED_FILE):
-        return set()
-    with open(POSTED_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f.readlines())
+    if os.path.exists(POSTED_FILE):
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
 
-def save_posted(url):
-    with open(POSTED_FILE, "a", encoding="utf-8") as f:
-        f.write(url + "\n")
+def save_posted():
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(posted), f, ensure_ascii=False, indent=2)
 
-# ---------- Récupération des articles ----------
-async def get_articles():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(SOURCE_URL, timeout=15) as response:
-            html = await response.text()
+posted = load_posted()
 
-    soup = BeautifulSoup(html, "html.parser")
-    articles = []
+# ================= IMAGE =================
+def extract_image(entry):
+    if hasattr(entry, "media_content"):
+        for m in entry.media_content:
+            if m.get("url"):
+                return m["url"]
+    if hasattr(entry, "media_thumbnail"):
+        return entry.media_thumbnail[0].get("url")
+    if hasattr(entry, "summary"):
+        soup = BeautifulSoup(entry.summary, "html.parser")
+        img = soup.find("img")
+        if img and img.get("src"):
+            return img["src"]
+    return DEFAULT_IMAGE
 
-    for item in soup.select("article"):
+# ================= CONTENT =================
+def build_message(title, summary, source):
+    title = escape_md(clean_text(title, 80))
+    summary = escape_md(clean_text(summary, 350))
+    source = escape_md(source)
+
+    return f"""⚽ *ACTUALITÉ FOOTBALL*
+
+*{title}*
+
+{summary}
+
+📰 *Source* : {source}
+🕒 *{datetime.utcnow().strftime('%H:%M')} UTC*
+
+#Football #Foot
+"""
+
+# ================= PROMO =================
+async def send_promo_message():
+    logger.info("📢 Envoi message promotionnel")
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔵 Rejoindre le canal", url=PROMO_CHANNEL_URL)]
+    ])
+
+    for channel in CHANNEL_IDS:
         try:
-            title = item.select_one("h2").text.strip()
-            link = "https://www.footmercato.net" + item.find("a")["href"]
-            image = item.find("img")["src"]
-            articles.append((title, link, image))
-        except Exception:
+            await bot.send_message(
+                chat_id=channel,
+                text=PROMO_MESSAGE,
+                reply_markup=keyboard
+            )
+        except TelegramError as e:
+            logger.error(f"Erreur promo {channel}: {e}")
+
+# ================= NEWS =================
+async def check_news():
+    new_posts = 0
+
+    for url in RSS_FEEDS:
+        feed = feedparser.parse(url)
+        if feed.bozo or not feed.entries:
             continue
 
-    return articles
+        for entry in feed.entries[:3]:
+            if not hasattr(entry, "link"):
+                continue
 
-# ---------- Publication Telegram ----------
-async def post_to_telegram(title, link, image):
-    caption = f"⚽ *{title}*\n\n👉 [Lire l'article]({link})"
-    await bot.send_photo(
-        chat_id=CHANNEL_ID,
-        photo=image,
-        caption=caption,
-        parse_mode="Markdown"
-    )
+            uid = hash_article(entry.title, entry.link)
+            if uid in posted:
+                continue
 
-# ---------- Boucle principale ----------
+            image = extract_image(entry)
+            message = build_message(
+                entry.title,
+                getattr(entry, "summary", entry.title),
+                feed.feed.get("title", "Média")
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔘 Lire l’article", url=entry.link)]
+            ])
+
+            for channel in CHANNEL_IDS:
+                try:
+                    await bot.send_photo(
+                        chat_id=channel,
+                        photo=image,
+                        caption=message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=keyboard
+                    )
+                except TelegramError as e:
+                    logger.error(f"Telegram error: {e}")
+
+            posted.add(uid)
+            new_posts += 1
+            await asyncio.sleep(15)
+
+    if new_posts:
+        save_posted()
+
+    return new_posts
+
+# ================= MAIN LOOP =================
 async def main():
-    posted = load_posted()
+    logger.info("🤖 Bot Football + Promo démarré")
+
+    last_day = None
+    promo_morning = False
+    promo_evening = False
 
     while True:
-        print("🔍 Vérification des nouvelles actualités...")
         try:
-            articles = await get_articles()
+            now = datetime.utcnow()
+            today = now.date()
 
-            for title, link, image in articles:
-                if link not in posted:
-                    await post_to_telegram(title, link, image)
-                    save_posted(link)
-                    posted.add(link)
-                    print("✅ Publié :", title)
-                    await asyncio.sleep(5)
+            if today != last_day:
+                promo_morning = False
+                promo_evening = False
+                last_day = today
+
+            # 09h UTC
+            if now.hour == 9 and not promo_morning:
+                await send_promo_message()
+                promo_morning = True
+
+            # 18h UTC
+            if now.hour == 18 and not promo_evening:
+                await send_promo_message()
+                promo_evening = True
+
+            await check_news()
+            await asyncio.sleep(60)
 
         except Exception as e:
-            print("❌ Erreur :", e)
+            logger.error(f"Erreur boucle principale: {e}")
+            await asyncio.sleep(60)
 
-        await asyncio.sleep(CHECK_INTERVAL)
-
-# ---------- Lancement ----------
+# ================= START =================
 if __name__ == "__main__":
+    if not BOT_TOKEN or not CHANNEL_IDS:
+        logger.error("❌ BOT_TOKEN ou CHANNEL_IDS manquant")
+        exit(1)
+
     asyncio.run(main())

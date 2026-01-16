@@ -13,10 +13,10 @@ import aiohttp
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules, ex: @channel1,@channel2
+CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-# Flux RSS francophones (Seulement Lequipe et Footmercato)
+# Flux RSS football francophones
 RSS_FEEDS = [
     "https://www.lequipe.fr/rss/actu_rss_Football.xml",
     "https://www.footmercato.net/rss"
@@ -99,6 +99,8 @@ def analyze_content(title, summary):
         return 'transfert'
     if any(word in text for word in ["blessure", "indisponible"]):
         return 'blessure'
+    if any(word in text for word in ["championnat", "ligue", "coupe"]):
+        return 'championnat'
     return 'general'
 
 def generate_enriched_content(title, summary, source):
@@ -118,6 +120,24 @@ def generate_enriched_content(title, summary, source):
         f"{hashtags}"
     )
     return escape_markdown(message)
+
+# ---------------- IMAGE EXTRACTION ----------------
+def extract_image(entry):
+    # 1️⃣ Vérifie media_content ou media_thumbnail
+    if 'media_content' in entry:
+        return entry.media_content[0].get('url')
+    if 'media_thumbnail' in entry:
+        return entry.media_thumbnail[0].get('url')
+    
+    # 2️⃣ Sinon cherche la première image dans le summary/description
+    summary = entry.get('summary', '') or entry.get('description', '')
+    soup = BeautifulSoup(summary, 'html.parser')
+    img_tag = soup.find('img')
+    if img_tag and img_tag.get('src'):
+        return img_tag['src']
+    
+    # 3️⃣ Pas d'image trouvée
+    return None
 
 # ---------------- POST NEWS ----------------
 async def post_to_channels(photo_url, message, button_url=None):
@@ -148,12 +168,10 @@ async def rss_scheduler():
                                 continue
                             title = entry.get('title', '')
                             summary = entry.get('summary', '') or entry.get('description', '')
-                            # Image extraction
-                            img_url = None
-                            if 'media_content' in entry:
-                                img_url = entry.media_content[0].get('url')
-                            elif 'media_thumbnail' in entry:
-                                img_url = entry.media_thumbnail[0].get('url')
+                            
+                            # 📸 Extraction automatique de l'image
+                            img_url = extract_image(entry)
+                            
                             msg = generate_enriched_content(title, summary, feed.feed.get('title'))
                             await post_to_channels(img_url, msg, button_url=link)
                             posted_links.add(link)
@@ -163,35 +181,10 @@ async def rss_scheduler():
                     logger.error(f"❌ Erreur RSS {feed_url}: {e}")
             await asyncio.sleep(900)  # Toutes les 15 minutes
 
-# ---------------- PROMO ----------------
-PROMO_MESSAGE = (
-    "🚫 Arrêté d'acheter les C0UP0NS qui vont perdre tous le temps🚫, "
-    "un bon pronostiqueur ne vend rien si effectivement il gagne✅, "
-    "Venez prendre les C0UP0NS GRATUITEMENT✅ tout les jours dans ce CANAL TELEGRAM🌐 fiable à 90%\n\n"
-    "🔵Lien du CANAL : https://t.me/mrxpronosfr"
-)
-
-async def send_promo():
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Rejoindre le canal", url="https://t.me/mrxpronosfr")]])
-    for channel in CHANNELS:
-        try:
-            await bot.send_message(chat_id=channel, text=escape_markdown(PROMO_MESSAGE), parse_mode="MarkdownV2", reply_markup=keyboard)
-            logger.info(f"📢 Envoi message promo à {channel}")
-        except TelegramError as e:
-            logger.error(f"❌ Erreur promo {channel}: {e}")
-
-async def promo_scheduler():
-    while True:
-        await send_promo()
-        await asyncio.sleep(12*60*60)  # 12h
-
 # ---------------- MAIN ----------------
 async def main():
-    logger.info("🤖 Bot Football + Promo démarré")
-    await asyncio.gather(
-        rss_scheduler(),
-        promo_scheduler()
-    )
+    logger.info("🤖 Bot Football démarré")
+    await rss_scheduler()
 
 if __name__ == "__main__":
     if not BOT_TOKEN or not CHANNELS:

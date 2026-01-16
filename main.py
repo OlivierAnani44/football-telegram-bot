@@ -1,34 +1,13 @@
 import os
-import asyncio
-from telegram import Bot
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-
-bot = Bot(token=BOT_TOKEN)
-
-async def main():
-    await bot.send_message(chat_id=CHANNEL_ID, text="🚀 Test bot Railway OK !")
-
-# Exécute la coroutine
-asyncio.run(main())
-
-
-
-
-'''
-import os
 import feedparser
-import requests
-import time
-import schedule
 import json
+import asyncio
 import logging
 from telegram import Bot
+
 # 🔑 CONFIGURATION
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-
 
 RSS_FEEDS = [
     "https://www.lequipe.fr/rss/actu_rss_Football.xml",
@@ -39,7 +18,7 @@ POSTED_FILE = "posted.json"
 
 # ⚙️ Initialisation bot et logging
 bot = Bot(token=BOT_TOKEN)
-logging.basicConfig(filename="bot.log", level=logging.ERROR, 
+logging.basicConfig(filename="bot.log", level=logging.ERROR,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 🔄 Chargement des liens déjà postés
@@ -67,23 +46,17 @@ def get_image(entry):
 
 # 🔤 Échappement des caractères spéciaux pour MarkdownV2
 def escape_markdown(text):
-    escape_chars = r"_*[]()~`>#+-=|{}.!"
+    escape_chars = r"_*[]()~`>#+-=|{}.!"""
     return ''.join(['\\' + c if c in escape_chars else c for c in text])
 
-def post_news():
+# 📰 Publication des news (version asynchrone)
+async def post_news():
     print("📡 Récupération des flux RSS...")
     for feed_url in RSS_FEEDS:
         feed = feedparser.parse(feed_url)
         print(f"Flux chargé : {feed_url} ({len(feed.entries)} entrées)")
-        ...
 
-
-# 📰 Publication des news
-def post_news():
-    for feed_url in RSS_FEEDS:
-        feed = feedparser.parse(feed_url)
-
-        for entry in feed.entries[:3]:  # On ne prend que les 3 dernières
+        for entry in feed.entries[:3]:
             if entry.link in posted_links:
                 continue
 
@@ -100,14 +73,14 @@ def post_news():
 
             try:
                 if image_url:
-                    bot.send_photo(
+                    await bot.send_photo(
                         chat_id=CHANNEL_ID,
                         photo=image_url,
                         caption=message,
                         parse_mode="MarkdownV2"
                     )
                 else:
-                    bot.send_message(
+                    await bot.send_message(
                         chat_id=CHANNEL_ID,
                         text=message,
                         parse_mode="MarkdownV2"
@@ -115,21 +88,19 @@ def post_news():
 
                 posted_links.add(link)
                 save_posted_links()
-                time.sleep(5)  # Petite pause pour éviter le spam
+                await asyncio.sleep(5)  # Petite pause pour éviter le spam
 
             except Exception as e:
                 logging.error(f"Erreur lors de l'envoi du post : {e}")
 
-# 🔁 Fonction pour planification
-def start_bot():
-    post_news()
+# 🔁 Boucle de planification toutes les 30 minutes
+async def scheduler():
+    while True:
+        await post_news()
+        print("⏱ En attente de la prochaine tâche...")
+        await asyncio.sleep(30 * 60)  # 30 minutes
 
-# ⏰ Planification toutes les 30 minutes
-schedule.every(1).minutes.do(start_bot)
-
-print("🤖 Bot football lancé...")
-
-while True:
-    schedule.run_pending()
-    time.sleep(1)
-'''
+# 🏁 Lancement du bot
+if __name__ == "__main__":
+    print("🤖 Bot football lancé...")
+    asyncio.run(scheduler())

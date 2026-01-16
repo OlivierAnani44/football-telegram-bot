@@ -51,6 +51,14 @@ def escape_markdown(text):
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return ''.join(['\\' + c if c in escape_chars else c for c in text])
 
+def post_news():
+    print("📡 Récupération des flux RSS...")
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        print(f"Flux chargé : {feed_url} ({len(feed.entries)} entrées)")
+        ...
+
+
 # 📰 Publication des news
 def post_news():
     for feed_url in RSS_FEEDS:

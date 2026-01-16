@@ -8,7 +8,7 @@ PINNED_TEXT = """
 🎁 Code promo : **XPVIP**
 
 👉 Pariez ici :
-https://affpa.top/L?tag=TON_LIEN_AFFILIE_ICI
+https://refpa58144.com/L?tag=d_5133758m_4129c_&site=5133758&ad=4129
 
 ⚠️ Jouez responsablement (18+)
 """

@@ -1,7 +1,7 @@
 AFFILIATE = {
     "name": "1xBet",
     "promo_code": "XPVIP",
-    "link": "https://affpa.top/L?tag=TON_LIEN_AFFILIE_ICI"
+    "link": "https://refpa58144.com/L?tag=d_5133758m_4129c_&site=5133758&ad=4129"
 }
 
 def get_affiliate_block():

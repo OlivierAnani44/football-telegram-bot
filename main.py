@@ -67,22 +67,28 @@ def escape_markdown(text):
     escape_chars = r"_*[]()~`>#+-=|{}.!"""
     return ''.join(['\\' + c if c in escape_chars else c for c in text])
 
-# 🚀 Réécriture de l'article avec IA (français et accrocheur)
+# 🚀 Réécriture de l'article avec IA (FRANÇAIS et accrocheur)
 async def rewrite_article(text):
     # Supprime les liens
     text_no_links = re.sub(r'http\S+', '', text)
 
-    prompt = f"""Réécris ce texte en français pour Telegram de manière dynamique et accrocheuse.
-Utilise des phrases courtes, des emojis football ⚽🔥📰, et rends-le captivant.
-Ne mets aucun lien.
+    prompt = f"""
+Réécris strictement ce texte en FRANÇAIS pour Telegram, de manière dynamique et accrocheuse.
+- Utilise des phrases courtes.
+- Ajoute des emojis football ⚽🔥📰.
+- Ne mets aucun lien.
+- Ne répond jamais en anglais.
 
-{text_no_links}"""
+Texte à réécrire :
+{text_no_links}
+"""
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=300
+            max_tokens=300,
+            temperature=0.7
         )
         rewritten = response['choices'][0]['message']['content'].strip()
         return rewritten
@@ -140,5 +146,5 @@ async def scheduler():
 
 # 🏁 Lancement
 if __name__ == "__main__":
-    print("🤖 Bot football avec IA et images principales lancé...")
+    print("🤖 Bot football avec IA en français et images principales lancé...")
     asyncio.run(scheduler())

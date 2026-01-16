@@ -6,6 +6,7 @@ import logging
 import re
 import openai
 from telegram import Bot
+from bs4 import BeautifulSoup
 
 # 🔑 CONFIGURATION
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -20,7 +21,6 @@ RSS_FEEDS = [
 ]
 
 POSTED_FILE = "posted.json"
-DEFAULT_IMAGE = "https://i.imgur.com/7vQKX0l.png"  # image par défaut si RSS n'en fournit pas
 
 # ⚙️ Initialisation bot et logging
 bot = Bot(token=BOT_TOKEN)
@@ -40,27 +40,38 @@ def save_posted_links():
 
 posted_links = load_posted_links()
 
-# 🖼️ Récupération de l'image depuis le flux RSS
+# 🖼️ Récupération de l'image principale depuis le flux RSS
 def get_image(entry):
+    # 1️⃣ media_content
     if "media_content" in entry and entry.media_content:
         return entry.media_content[0].get('url')
-    if "links" in entry:
-        for link in entry.links:
-            if "image" in link.type:
-                return link.href
-    return DEFAULT_IMAGE
+    
+    # 2️⃣ enclosures
+    if "enclosures" in entry:
+        for enc in entry.enclosures:
+            if enc.get("type", "").startswith("image"):
+                return enc.get("href")
+    
+    # 3️⃣ image dans summary ou content HTML
+    content = entry.get("summary", "") or entry.get("content", [{}])[0].get("value", "")
+    soup = BeautifulSoup(content, "html.parser")
+    img_tag = soup.find("img")
+    if img_tag and img_tag.get("src"):
+        return img_tag.get("src")
+    
+    # 4️⃣ pas d'image
+    return None
 
 # 🔤 Échappement MarkdownV2
 def escape_markdown(text):
     escape_chars = r"_*[]()~`>#+-=|{}.!"""
     return ''.join(['\\' + c if c in escape_chars else c for c in text])
 
-# 🚀 Réécriture de l'article avec IA pour Telegram (français et accrocheur)
+# 🚀 Réécriture de l'article avec IA (français et accrocheur)
 async def rewrite_article(text):
-    # Supprimer les liens
+    # Supprime les liens
     text_no_links = re.sub(r'http\S+', '', text)
 
-    # Prompt stable pour éviter les erreurs de f-string
     prompt = f"""Réécris ce texte en français pour Telegram de manière dynamique et accrocheuse.
 Utilise des phrases courtes, des emojis football ⚽🔥📰, et rends-le captivant.
 Ne mets aucun lien.
@@ -79,16 +90,21 @@ Ne mets aucun lien.
         logging.error(f"Erreur IA : {e}")
         return text_no_links[:300] + "..."
 
-# 📰 Publication des news immédiatement dès qu'elles sont nouvelles
+# 📰 Vérifie et publie uniquement les nouveaux articles avec image
 async def check_and_post_news():
     new_posts = 0
     for feed_url in RSS_FEEDS:
         feed = feedparser.parse(feed_url)
-        for entry in feed.entries[:5]:  # prendre quelques derniers articles
+        for entry in feed.entries[:5]:
             if entry.link in posted_links:
                 continue
 
-            # Réécriture de l'article
+            # Cherche l'image principale
+            image_url = get_image(entry)
+            if not image_url:
+                continue  # on ne publie pas sans image
+
+            # Réécriture
             summary = await rewrite_article(entry.summary)
             title = escape_markdown(entry.title)
             summary = escape_markdown(summary)
@@ -96,8 +112,6 @@ async def check_and_post_news():
             message = f"""⚽ *ACTUALITÉ FOOTBALL*\n
 🔥 *{title}*\n
 📰 {summary}"""
-
-            image_url = get_image(entry)
 
             try:
                 await bot.send_photo(
@@ -110,7 +124,6 @@ async def check_and_post_news():
                 save_posted_links()
                 new_posts += 1
                 await asyncio.sleep(5)
-
             except Exception as e:
                 logging.error(f"Erreur lors de l'envoi du post : {e}")
 
@@ -119,14 +132,13 @@ async def check_and_post_news():
     else:
         print("⏱ Aucun nouvel article pour l'instant.")
 
-# 🔁 Boucle de vérification en continu (toutes les 1 minute)
+# 🔁 Boucle de vérification continue
 async def scheduler():
     while True:
         await check_and_post_news()
-        await asyncio.sleep(60)  # vérifie toutes les minutes
+        await asyncio.sleep(60)  # toutes les 1 minute
 
 # 🏁 Lancement
 if __name__ == "__main__":
-    print("🤖 Bot football avec IA et publication instantanée lancé...")
+    print("🤖 Bot football avec IA et images principales lancé...")
     asyncio.run(scheduler())
-

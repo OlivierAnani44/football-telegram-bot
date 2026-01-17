@@ -9,4 +9,4 @@ pyrogram
 tgcrypto
 telethon==1.34.0
 pysocks==1.7.1
-argostranslate==1.8.0
+

@@ -91,6 +91,7 @@ def highlight_keywords(text):
 
 # ================= IMAGE =================
 def extract_image(entry):
+    # Cherche dans media_content, media_thumbnail ou enclosures
     if "media_content" in entry:
         return entry.media_content[0].get("url")
     if "media_thumbnail" in entry:
@@ -158,8 +159,12 @@ async def rss_loop():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                async with session.get(RSS_FEED, timeout=20) as r:
-                    feed = feedparser.parse(await r.text())
+                headers = {"User-Agent": "Mozilla/5.0"}
+                async with session.get(RSS_FEED, headers=headers, timeout=20) as r:
+                    text = await r.text(encoding='utf-8', errors='ignore')
+                    feed = feedparser.parse(text)
+
+                    logger.info(f"Nombre d'articles trouvés : {len(feed.entries)}")
 
                     for entry in feed.entries:
                         uid = entry.get("id") or entry.get("link")

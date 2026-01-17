@@ -85,3 +85,7 @@ async def handler(client, message):
     save_posted()
 
 # ---------------- STA
+# ---------------- START ----------------
+if __name__ == "__main__":
+    logger.info("🤖 Bot démarré")
+    app.run()

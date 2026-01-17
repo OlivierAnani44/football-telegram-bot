@@ -22,7 +22,8 @@ RSS_FEEDS = [
     "https://www.foot01.com/rss/actus.xml",
     "https://www.sofoot.com/feed",
     "https://www.goal.com/fr/feeds/news?fmt=rss",
-    "https://www.90min.com/feeds/news"
+    "https://www.90min.com/feeds/news",
+    "https://feeds.bbci.co.uk/sport/football/rss.xml"
 ]
 
 POSTED_FILE = "posted.json"

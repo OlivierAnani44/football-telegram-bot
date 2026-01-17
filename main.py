@@ -4,65 +4,83 @@ import logging
 import asyncio
 from pyrogram import Client, filters
 
-API_ID = int(os.getenv("API_ID"))
+# ---------------- CONFIG ----------------
+API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
-CHANNELS = [c.strip() for c in os.getenv("CHANNELS").split(",")]
+CHANNELS = os.getenv("CHANNELS", "")
+
+if not all([API_ID, API_HASH, BOT_TOKEN, SOURCE_CHANNEL, CHANNELS]):
+    raise RuntimeError("❌ Variables d'environnement manquantes")
+
+API_ID = int(API_ID)
+CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
 POSTED_FILE = "posted.json"
+MAX_POSTED = 3000
 
-logging.basicConfig(level=logging.INFO)
+# ---------------- LOG ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# Chargement des messages déjà transférés
-def load_posted_links():
+# ---------------- POSTED ----------------
+def load_posted():
     if os.path.exists(POSTED_FILE):
         with open(POSTED_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
     return set()
 
-def save_posted_links(links):
+def save_posted():
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(links), f, ensure_ascii=False, indent=2)
+        json.dump(list(posted), f)
 
-posted_links = load_posted_links()
+posted = load_posted()
 
-# Transfert des messages vers les canaux
-async def forward_message(client, text, photo=None):
-    for channel in CHANNELS:
-        try:
-            if photo:
-                await client.send_photo(chat_id=channel, photo=photo, caption=text)
-            else:
-                await client.send_message(chat_id=channel, text=text)
-            logger.info(f"✅ Message transféré sur {channel}")
-        except Exception as e:
-            logger.error(f"❌ Erreur publication {channel}: {e}")
-        await asyncio.sleep(0.5)
+# ---------------- BOT ----------------
+app = Client(
+    name="football_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True   # 🔥 IMPORTANT
+)
 
-# Client utilisateur
-app = Client("user_session", api_id=API_ID, api_hash=API_HASH)
-
+# ---------------- HANDLER ----------------
 @app.on_message(filters.chat(SOURCE_CHANNEL))
-async def new_message_handler(client, message):
-    msg_id = str(message.message_id)
-    if msg_id in posted_links:
+async def handler(client, message):
+    msg_id = str(message.id)
+    if msg_id in posted:
         return
 
     text = message.text or message.caption
     if not text:
         return
 
-    if "http" in text.lower() or "aten10" in text.lower():
+    text_low = text.lower()
+    if "http" in text_low or "aten10" in text_low:
         return
 
-    photo = message.photo.file_id if message.photo else None
+    for ch in CHANNELS:
+        try:
+            if message.photo:
+                await client.send_photo(
+                    chat_id=ch,
+                    photo=message.photo.file_id,
+                    caption=text
+                )
+            else:
+                await client.send_message(ch, text)
+            logger.info(f"✅ Envoyé vers {ch}")
+        except Exception as e:
+            logger.error(f"❌ Erreur {ch}: {e}")
+        await asyncio.sleep(0.6)
 
-    await forward_message(client, text, photo)
-    posted_links.add(msg_id)
-    save_posted_links(posted_links)
+    posted.add(msg_id)
+    save_posted()
 
-if __name__ == "__main__":
-    logger.info("🤖 Bot Telegram en écoute...")
-    app.run()
+# ---------------- STA

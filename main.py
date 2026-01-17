@@ -53,6 +53,7 @@ app = Client(
 # ---------------- HANDLER ----------------
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def handler(client, message):
+    logger.info(f"📩 Message reçu: {message.id}")
     msg_id = str(message.id)
     if msg_id in posted:
         return

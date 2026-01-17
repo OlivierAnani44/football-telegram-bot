@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re
 import random
+import time
 from datetime import datetime
 from telegram import Bot
 from telegram.error import TelegramError
@@ -22,42 +23,44 @@ RSS_FEEDS = [
 
 POSTED_FILE = "posted.json"
 MAX_POSTED_LINKS = 2500
-MIN_POST_INTERVAL = 300  # ⏱️ 5 minutes minimum entre chaque post
+MIN_POST_INTERVAL = 300  # 5 minutes minimum
 
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- LOGGING ----------------
+# ---------------- LOG ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # ---------------- DATA ----------------
 EMOJI_CATEGORIES = {
-    "sortie": ["🎬", "🍿", "🎥"],
+    "sortie": ["🎬", "🍿"],
     "critique": ["⭐", "📝"],
     "bande_annonce": ["▶️", "🎞️"],
     "casting": ["🎭"],
     "general": ["📰", "🔥"]
 }
 
-PHRASES_ACCROCHE = {
-    "general": ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVEAUTÉ : "]
-}
+PHRASES_ACCROCHE = [
+    "INFO",
+    "ACTU",
+    "NOUVEAUTÉ"
+]
 
 HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Actu", "#PopCulture"]
 
 ENGAGEMENT_PHRASES = [
-    "💬 *Votre avis nous intéresse !*\n👇 Dites-nous ce que vous en pensez",
-    "🗣️ *Débat ouvert !*\n👇 Réagissez en commentaire",
-    "🍿 *Alors, verdict ?*\n👇 On en parle juste en dessous",
-    "🔥 *Ça fait réagir ?*\n👇 Laissez votre avis"
+    "💬 Ton avis compte, dis-nous ce que tu en penses en commentaire",
+    "🗣️ Débat ouvert, partage ton opinion",
+    "🍿 Verdict du public en commentaire",
+    "🔥 Réagis juste en dessous"
 ]
 
 CATEGORY_QUESTIONS = {
-    "sortie": ["🎬 Vous attendez cette sortie ?", "🍿 Hâte ou pas ?"],
-    "critique": ["⭐ Vous êtes d’accord avec cette critique ?", "📝 Quelle note lui donneriez-vous ?"],
-    "bande_annonce": ["▶️ Cette bande-annonce vous convainc ?", "🎞️ Ça donne envie ?"],
-    "casting": ["🎭 Bon choix de casting selon vous ?", "🤔 Casting réussi ?"],
-    "general": ["📰 Qu’en pensez-vous ?", "🤔 Votre avis ?"]
+    "sortie": ["Cette sortie t’intéresse ?", "Tu comptes aller le voir ?"],
+    "critique": ["Es-tu d’accord avec cette critique ?", "Quelle note lui donnerais-tu ?"],
+    "bande_annonce": ["Cette bande-annonce te convainc ?", "Ça donne envie ?"],
+    "casting": ["Bon choix de casting selon toi ?", "Casting réussi ou non ?"],
+    "general": ["Qu’en penses-tu ?", "Ton avis ?"]
 }
 
 # ---------------- STORAGE ----------------
@@ -75,9 +78,6 @@ posted_links = load_posted()
 last_post_time = 0
 
 # ---------------- UTILS ----------------
-def escape_md(text):
-    return re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', text)
-
 def clean_text(text, max_len=500):
     text = re.sub(r"<[^>]+>", "", text or "")
     text = re.sub(r"\s+", " ", text).strip()
@@ -95,39 +95,47 @@ def analyze(title, summary):
         return "sortie"
     return "general"
 
+# ---------------- IMAGE (OBLIGATOIRE) ----------------
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
+
     soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
     img = soup.find("img")
-    return img["src"] if img else None
+    if img and img.get("src"):
+        return img["src"]
+
+    return None  # ❌ aucune image → pas de post
 
 # ---------------- MESSAGE ----------------
 def generate_message(title, summary, source):
     cat = analyze(title, summary)
 
-    msg = (
+    message = (
         f"{random.choice(EMOJI_CATEGORIES[cat])} "
-        f"{random.choice(PHRASES_ACCROCHE['general'])}"
-        f"*{clean_text(title, 80)}*\n\n"
+        f"<b>{random.choice(PHRASES_ACCROCHE)}</b>\n\n"
+        f"<b>{clean_text(title, 80)}</b>\n\n"
         f"{clean_text(summary)}\n\n"
-        f"📰 *Source :* {source}\n"
-        f"🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n"
-        f"📊 *Catégorie :* {cat.upper()}\n\n"
-        f"❓ *{random.choice(CATEGORY_QUESTIONS[cat])}*\n"
+        f"📰 <b>Source :</b> {source}\n"
+        f"🕐 <b>Publié :</b> {datetime.now().strftime('%H:%M')}\n"
+        f"📊 <b>Catégorie :</b> {cat.upper()}\n\n"
+        f"❓ <b>{random.choice(CATEGORY_QUESTIONS[cat])}</b>\n"
         f"{random.choice(ENGAGEMENT_PHRASES)}\n\n"
         f"{' '.join(HASHTAGS_FR)}"
     )
-    return escape_md(msg)
+
+    return message
 
 # ---------------- POST ----------------
 async def post(photo, text):
     for channel in CHANNELS:
         try:
-            if photo:
-                await bot.send_photo(channel, photo=photo, caption=text, parse_mode="MarkdownV2")
-            else:
-                await bot.send_message(channel, text=text, parse_mode="MarkdownV2")
+            await bot.send_photo(
+                chat_id=channel,
+                photo=photo,
+                caption=text,
+                parse_mode="HTML"
+            )
             logger.info(f"✅ Posté sur {channel}")
         except TelegramError as e:
             logger.error(e)
@@ -150,24 +158,26 @@ async def scheduler():
                     if not link or link in posted_links:
                         continue
 
+                    image = extract_image(entry)
+                    if not image:
+                        continue  # ⛔ IMAGE OBLIGATOIRE
+
                     msg = generate_message(
                         entry.get("title", ""),
                         entry.get("summary", ""),
                         feed.feed.get("title", "Média")
                     )
 
-                    await post(extract_image(entry), msg)
+                    await post(image, msg)
 
                     posted_links.add(link)
                     save_posted()
                     last_post_time = time.time()
-
-                    break  # ⛔ UN SEUL POST MAX
+                    break  # ⛔ 1 seul post max
 
             await asyncio.sleep(60)
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    import time
     logger.info("🤖 Bot démarré")
     asyncio.run(scheduler())

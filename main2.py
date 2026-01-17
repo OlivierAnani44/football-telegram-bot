@@ -86,13 +86,44 @@ def keyword_allowed(title, summary):
     return any(k in text for k in FILTER_KEYWORDS)
 
 # ---------------- IMAGE ----------------
-def extract_image(entry):
+async def extract_image(entry, session):
+    # 1️⃣ RSS media
     if "media_content" in entry:
-        return entry.media_content[0].get("url")
-    summary = entry.get("summary", "")
-    soup = BeautifulSoup(summary, "html.parser")
-    img = soup.find("img")
-    return img["src"] if img else None
+        url = entry.media_content[0].get("url")
+        if url:
+            return url
+
+    if "media_thumbnail" in entry:
+        url = entry.media_thumbnail[0].get("url")
+        if url:
+            return url
+
+    # 2️⃣ Scraping page article
+    link = entry.get("link")
+    if not link:
+        return None
+
+    try:
+        async with session.get(link, timeout=15) as r:
+            html = await r.text()
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Allociné
+        og = soup.find("meta", property="og:image")
+        if og and og.get("content"):
+            return og["content"]
+
+        # SeriesAddict / générique
+        img = soup.find("img")
+        if img and img.get("src"):
+            return img["src"]
+
+    except Exception as e:
+        logger.warning(f"⚠️ Image non récupérée : {e}")
+
+    return None
+
 
 # ---------------- MESSAGE ----------------
 def build_message(title, summary, source):

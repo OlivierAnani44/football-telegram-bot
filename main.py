@@ -16,10 +16,10 @@ if not all([API_ID, API_HASH, BOT_TOKEN, SOURCE_CHANNEL, CHANNELS]):
     raise RuntimeError("❌ Variables d'environnement manquantes")
 
 API_ID = int(API_ID)
-CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
+SOURCE_CHANNEL = int(SOURCE_CHANNEL)
+CHANNELS = [int(c.strip()) for c in CHANNELS.split(",") if c.strip()]
 
 POSTED_FILE = "posted.json"
-MAX_POSTED = 3000
 
 # ---------------- LOG ----------------
 logging.basicConfig(
@@ -47,13 +47,14 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True   # 🔥 IMPORTANT
+    in_memory=True
 )
 
 # ---------------- HANDLER ----------------
 @app.on_message(filters.chat(SOURCE_CHANNEL))
 async def handler(client, message):
     logger.info(f"📩 Message reçu: {message.id}")
+
     msg_id = str(message.id)
     if msg_id in posted:
         return
@@ -76,16 +77,18 @@ async def handler(client, message):
                 )
             else:
                 await client.send_message(ch, text)
+
             logger.info(f"✅ Envoyé vers {ch}")
         except Exception as e:
             logger.error(f"❌ Erreur {ch}: {e}")
+
         await asyncio.sleep(0.6)
 
     posted.add(msg_id)
     save_posted()
 
-# ---------------- STA
 # ---------------- START ----------------
 if __name__ == "__main__":
-    logger.info("🤖 Bot démarré")
+    logger.info("🤖 Bot démarré et en écoute...")
     app.run()
+

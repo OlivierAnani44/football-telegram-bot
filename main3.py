@@ -12,180 +12,140 @@ from telegram.constants import ParseMode
 from bs4 import BeautifulSoup
 from html import escape
 
-# ---------------- CONFIGURATION ----------------
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-# Flux RSS football
 RSS_FEEDS = [
-    "https://www.lequipe.fr/rss/actu_rss_Football.xml",       # L'Équipe Foot
-    "https://www.footmercato.net/rss/actus",                 # Foot Mercato
-    "https://www.foot01.com/rss/actus.xml",                  # Foot01
-    "https://www.sofoot.com/feed",                           # SoFoot
-    "https://www.futbol24.com/rss/rss.xml",                  # Futbol24
-    "https://www.goal.com/fr/feeds/news?fmt=rss",            # Goal FR
-    "https://www.fifa.com/rss/index.xml",                    # FIFA News
-    "https://www.uefa.com/rssfeed/uefaeuropeanleagues/rss.xml", # UEFA Europe
-    "https://www.90min.com/feeds/news"                       # 90min
+    "https://www.lequipe.fr/rss/actu_rss_Football.xml",
+    "https://www.footmercato.net/rss/actus",
+    "https://www.foot01.com/rss/actus.xml",
+    "https://www.sofoot.com/feed",
+    "https://www.goal.com/fr/feeds/news?fmt=rss",
+    "https://www.90min.com/feeds/news"
 ]
 
-
 POSTED_FILE = "posted.json"
-MAX_POSTED_LINKS = 2500
+MAX_POSTED_LINKS = 3000
 
-# Logging
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
+# ================= LOGS =================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("FootballUltimateBot")
 
-# ---------------- EMOJIS / PHRASES ----------------
-EMOJI_CATEGORIES = {
-    'match': ['⚽', '🏆', '🥅', '🔥'],
-    'transfert': ['🔄', '💰', '📝', '🚨'],
-    'resultat': ['📊', '🏅', '✅', '❌'],
-    'general': ['📰', '⚡', '🚀', '💥']
-}
+logger.info("⚽ BOT FOOTBALL ULTIME DÉMARRÉ")
 
-PHRASES_ACCROCHE = {
-    'match': ["⚽ Match : ", "🔥 Résultat : ", "🏆 En direct : "],
-    'transfert': ["🔄 Transfert : ", "💰 Nouvelle signature : ", "📝 Rumeur : "],
-    'resultat': ["📊 Score : ", "✅ Résultat officiel : "],
-    'general': ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
-}
-
-HASHTAGS_FR = ["#Football", "#Foot", "#Ligue1", "#LigueDesChampions", "#Mercato"]
-
-# ---------------- BOT ----------------
+# ================= BOT =================
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- POSTÉ ----------------
-def load_posted_links():
-    try:
-        if os.path.exists(POSTED_FILE):
-            with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                links = set(json.load(f))
-                if len(links) > MAX_POSTED_LINKS:
-                    links = set(list(links)[-MAX_POSTED_LINKS:])
-                logger.info(f"📁 {len(links)} liens chargés")
-                return links
-    except Exception as e:
-        logger.error(f"❌ Erreur chargement: {e}")
+# ================= STOCKAGE =================
+def load_posted():
+    if os.path.exists(POSTED_FILE):
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
     return set()
 
-def save_posted_links():
-    try:
-        with open(POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(posted_links), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde: {e}")
+def save_posted():
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(posted_links), f, ensure_ascii=False)
 
-posted_links = load_posted_links()
+posted_links = load_posted()
 
-# ---------------- UTILITAIRES ----------------
-def clean_text(text, max_len=500):
+# ================= UTILS =================
+def clean_text(text, limit=400):
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    if len(text) > max_len:
-        text = text[:max_len] + "..."
-    return text
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] + "..." if len(text) > limit else text
 
-# ---------------- ANALYSE ----------------
-def analyze_content(title, summary):
-    text = f"{title} {summary}".lower()
-    if any(word in text for word in ["match", "score", "résultat", "but", "victoire", "défaite"]):
-        return 'match'
-    if any(word in text for word in ["transfert", "signature", "rumeur", "mercato"]):
-        return 'transfert'
-    if any(word in text for word in ["score", "résultat", "victoire", "défaite"]):
-        return 'resultat'
-    return 'general'
-
-def generate_enriched_content(title, summary, source):
-    main_cat = analyze_content(title, summary)
-    clean_summary = clean_text(summary, max_len=400)
-    clean_title = clean_text(title, max_len=80)
-    
-    accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
-    emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
-    
-    hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
-    
-    main_part = (
-        f"<b><i>{escape(clean_title)}</i></b>\n\n"
-        f"<blockquote>{escape(clean_summary)}</blockquote>\n\n"
-    )
-
-    message = (
-        f"{''.join(emojis)} {accroche}\n\n"
-        f"{main_part}"
-        f"📰 <b>Source :</b> <code>{escape(source or 'Média')}</code>\n"
-        f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"
-        f"📊 <b>Catégorie :</b> {main_cat.upper()}\n\n"
-        f"{hashtags}"
-    )
-    
-    return message
-
-# ---------------- IMAGE ----------------
 def extract_image(entry):
-    if 'media_content' in entry:
-        return entry.media_content[0].get('url')
-    if 'media_thumbnail' in entry:
-        return entry.media_thumbnail[0].get('url')
-    summary = entry.get('summary', '') or entry.get('description', '')
-    soup = BeautifulSoup(summary, 'html.parser')
-    img_tag = soup.find('img')
-    return img_tag['src'] if img_tag else None
+    if "media_content" in entry:
+        return entry.media_content[0].get("url")
+    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
+    img = soup.find("img")
+    return img["src"] if img else None
 
-# ---------------- POST ----------------
-async def post_to_channels(message, photo_url=None):
-    for channel in CHANNELS:
+# ================= ANALYSE =================
+def detect_category(title):
+    t = title.lower()
+    if any(w in t for w in ["transfert", "mercato", "signature"]):
+        return "🔄 TRANSFERT"
+    if any(w in t for w in ["victoire", "défaite", "score", "but"]):
+        return "📊 RÉSULTAT"
+    if any(w in t for w in ["match", "face à", "contre"]):
+        return "⚽ MATCH"
+    return "📰 ACTU FOOT"
+
+def build_message(entry, source):
+    title = clean_text(entry.get("title", ""), 90)
+    summary = clean_text(entry.get("summary", ""), 420)
+    category = detect_category(title)
+
+    return (
+        f"{category}\n\n"
+        f"<b>{escape(title)}</b>\n\n"
+        f"<blockquote>{escape(summary)}</blockquote>\n\n"
+        f"📰 <b>Source :</b> {escape(source)}\n"
+        f"🕒 <b>Heure :</b> {datetime.now().strftime('%H:%M')}\n\n"
+        "#Football #Foot #ActuFoot"
+    )
+
+# ================= POST =================
+async def post(message, photo=None):
+    for ch in CHANNELS:
         try:
-            if photo_url:
-                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode=ParseMode.HTML)
+            if photo:
+                await bot.send_photo(ch, photo=photo, caption=message, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_message(chat_id=channel, text=message, parse_mode=ParseMode.HTML)
-            logger.info(f"✅ Publié sur {channel}")
+                await bot.send_message(ch, message, parse_mode=ParseMode.HTML)
+            logger.info(f"✅ Publié sur {ch}")
         except Exception as e:
-            logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(3,6))
+            logger.error(f"❌ Telegram erreur {ch}: {e}")
+        await asyncio.sleep(4)
 
-# ---------------- RSS SCHEDULER ----------------
+# ================= FETCH RSS =================
 async def fetch_feed(session, url):
-    async with session.get(url) as resp:
-        content = await resp.text()
+    async with session.get(url, headers=HEADERS, timeout=20) as r:
+        text = await r.text()
         loop = asyncio.get_event_loop()
-        feed = await loop.run_in_executor(None, lambda: feedparser.parse(content))
-        return feed
+        return await loop.run_in_executor(None, lambda: feedparser.parse(text))
 
-async def rss_scheduler():
+# ================= MAIN LOOP =================
+async def rss_loop():
     async with aiohttp.ClientSession() as session:
         while True:
-            for feed_url in RSS_FEEDS:
+            for url in RSS_FEEDS:
                 try:
-                    feed = await fetch_feed(session, feed_url)
-                    for entry in feed.entries:
-                        link = entry.get('link')
+                    feed = await fetch_feed(session, url)
+                    logger.info(f"📡 {url} → {len(feed.entries)} articles")
+
+                    for entry in feed.entries[:5]:  # limite anti-spam
+                        link = entry.get("link")
                         if not link or link in posted_links:
                             continue
-                        title = entry.get('title', '')
-                        summary = entry.get('summary', '') or entry.get('description', '')
-                        img_url = extract_image(entry)
-                        msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-                        await post_to_channels(msg, img_url)
-                        posted_links.add(link)
-                        save_posted_links()
-                        await asyncio.sleep(random.randint(5,10))
-                except Exception as e:
-                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-            await asyncio.sleep(900)  # Toutes les 15 min
 
-# ---------------- MAIN ----------------
+                        msg = build_message(entry, feed.feed.get("title", "Football"))
+                        img = extract_image(entry)
+
+                        await post(msg, img)
+                        posted_links.add(link)
+                        save_posted()
+                        await asyncio.sleep(6)
+
+                except Exception as e:
+                    logger.error(f"❌ RSS erreur {url}: {e}")
+
+            logger.info("⏳ Pause 10 minutes")
+            await asyncio.sleep(600)
+
+# ================= START =================
 if __name__ == "__main__":
-    asyncio.run(rss_scheduler())
+    asyncio.run(rss_loop())

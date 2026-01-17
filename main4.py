@@ -17,11 +17,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "")
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-RSS_FEED = "https://cryptoast.fr/feed/"
+RSS_FEED = "https://cointelegraph.com/rss"
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
 
-MIN_DELAY = 300  # 5 minutes minimum
+MIN_DELAY = 300  # 5 minutes
 MAX_POSTED = 3000
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -31,35 +31,30 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("CRYPTOAST")
+logger = logging.getLogger("CT_BOT")
 
 bot = Bot(token=BOT_TOKEN)
 
 # ================= STYLE =================
 ACCROCHES = [
-    "🔥 ACTU CRYPTO",
-    "🚀 BREAKING NEWS",
-    "📊 MARCHÉ CRYPTO"
+    "🚀 <b>BREAKING CRYPTO</b>",
+    "📊 <b>MARCHÉ CRYPTO</b>",
+    "🔥 <b>ACTU BLOCKCHAIN</b>"
 ]
 
 HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
 
 COMMENTS = [
-    "💬 Ton avis ?",
-    "📊 Bullish ou bearish ?",
-    "🔥 Impact réel selon toi ?",
-    "🤔 Bonne ou mauvaise nouvelle ?"
+    "💬 <i>Ton avis ?</i>",
+    "📊 <i>Bullish ou bearish ?</i>",
+    "🔥 <i>Impact réel selon toi ?</i>",
 ]
 
 POPULAR_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth",
-    "etf", "sec", "régulation",
-    "record", "hausse", "chute",
-    "crash", "hack", "faillite",
-    "institutionnel", "adoption"
+    "etf", "sec", "regulation", "adoption",
+    "crash", "hack", "institutional"
 ]
-
-MIN_TEXT_LENGTH = 300
 
 # ================= STORAGE =================
 def load_posted():
@@ -73,43 +68,41 @@ def load_posted():
 
 def save_posted():
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2, ensure_ascii=False)
+        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2)
 
 posted_links = load_posted()
 
 # ================= TEXT =================
-def clean_text(text, max_len=700):
+def clean_text(text, max_len=600):
     text = BeautifulSoup(text or "", "html.parser").get_text()
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:max_len] + "..." if len(text) > max_len else text
 
-def bold_keywords(text):
+def highlight_keywords(text):
     for kw in POPULAR_KEYWORDS:
-        pattern = re.compile(rf"\b({kw})\b", re.IGNORECASE)
-        text = pattern.sub(r"<b>\1</b>", text)
+        text = re.sub(
+            rf"\b({kw})\b",
+            r"<b>\1</b>",
+            text,
+            flags=re.IGNORECASE
+        )
     return text
-
-# ================= POPULAR FILTER =================
-def is_popular(title, summary):
-    text = f"{title} {summary}".lower()
-    hits = sum(1 for k in POPULAR_KEYWORDS if k in text)
-    return hits >= 2 and len(text) >= MIN_TEXT_LENGTH
 
 # ================= IMAGE =================
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
-    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-    img = soup.find("img")
-    return img["src"] if img else None
+    if "media_thumbnail" in entry:
+        return entry.media_thumbnail[0].get("url")
+    return None
 
 async def download_crypto_image():
-    url = "https://source.unsplash.com/1200x675/?cryptocurrency,bitcoin,blockchain"
+    url = "https://source.unsplash.com/1200x675/?crypto,bitcoin"
     filename = f"{IMAGE_DIR}/{uuid.uuid4().hex}.jpg"
 
     async with aiohttp.ClientSession() as s:
-        async with s.get(url, timeout=15) as r:
+        async with s.get(url) as r:
             if r.status == 200:
                 with open(filename, "wb") as f:
                     f.write(await r.read())
@@ -121,17 +114,23 @@ def build_message(title, summary):
     accroche = random.choice(ACCROCHES)
     hashtags = " ".join(random.sample(HASHTAGS, 3))
 
-    title = bold_keywords(clean_text(title, 100))
-    summary = bold_keywords(clean_text(summary))
+    title = highlight_keywords(clean_text(title, 100))
+    summary = highlight_keywords(clean_text(summary))
 
     return f"""
-<b>{accroche}</b>
+{accroche}
 
-📰 <b>{title}</b>
+<u><b>{title}</b></u>
 
-{summary}
+<blockquote>
+<i>{summary}</i>
+</blockquote>
 
-⏰ {datetime.now().strftime('%H:%M')}
+📌 <b>Détails techniques</b> :
+<code>source=Cointelegraph | type=crypto_news</code>
+
+⏰ <i>{datetime.now().strftime('%H:%M')}</i>
+
 {hashtags}
 """
 
@@ -148,7 +147,8 @@ async def post(channel, photo, message):
     await bot.send_message(
         channel,
         random.choice(COMMENTS),
-        reply_to_message_id=sent.message_id
+        reply_to_message_id=sent.message_id,
+        parse_mode="HTML"
     )
 
 # ================= LOOP =================
@@ -160,15 +160,12 @@ async def rss_loop():
                     feed = feedparser.parse(await r.text())
 
                     for entry in feed.entries:
-                        uid = entry.get("id") or entry.get("title")
+                        uid = entry.get("id") or entry.get("link")
                         if not uid or uid in posted_links:
                             continue
 
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
-
-                        if not is_popular(title, summary):
-                            continue
 
                         img = extract_image(entry)
                         temp = None
@@ -197,7 +194,7 @@ async def rss_loop():
 
 # ================= MAIN =================
 async def main():
-    logger.info("🤖 Bot Cryptoast lancé")
+    logger.info("🤖 Bot Cointelegraph lancé")
     await rss_loop()
 
 if __name__ == "__main__":

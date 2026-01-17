@@ -117,7 +117,7 @@ def generate_enriched_content(title, summary, source):
     )
 
     message = (
-        f"{''.join(emojis)} <b>{accroche}<b>\n\n"
+        f"{''.join(emojis)} {accroche}\n\n"
         f"{main_part}"
         f"📰 <b>Source :</b> <code>{escape(source or 'Média')}</code>\n"
         f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"

@@ -7,17 +7,15 @@ import aiohttp
 import feedparser
 import re
 from datetime import datetime
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram import Bot
+from telegram.constants import ParseMode
 from bs4 import BeautifulSoup
-from html import escape  # Échappe les caractères spéciaux HTML
+from html import escape
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules
-CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-# Flux RSS films/séries francophones
 RSS_FEEDS = [
     "https://www.allocine.fr/rss/news.xml",       # Actualités cinéma
     "https://www.seriesaddict.fr/rss/news.xml"   # Actualités séries
@@ -29,12 +27,11 @@ MAX_POSTED_LINKS = 2500
 # Logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Emojis et phrases
+# ---------------- EMOJIS / PHRASES ----------------
 EMOJI_CATEGORIES = {
     'sortie': ['🎬', '🍿', '✨', '🎥'],
     'critique': ['⭐', '📝', '👍', '👎'],
@@ -44,12 +41,16 @@ EMOJI_CATEGORIES = {
 }
 
 PHRASES_ACCROCHE = {
-    'general': ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVELLE : "]
+    'general': ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVELLE : "],
+    'sortie': ["🍿 Nouvelle sortie : ", "🎬 À l'affiche : "],
+    'critique': ["⭐ Critique : ", "📝 Avis : "],
+    'bande_annonce': ["▶️ Bande-annonce : ", "🎞️ Trailer : "],
+    'casting': ["🎭 Casting : ", "👩‍🎤👨‍🎤 Annonce : "]
 }
 
 HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Sortie", "#BandeAnnonce"]
 
-# Bot
+# ---------------- BOT ----------------
 bot = Bot(token=BOT_TOKEN)
 
 # ---------------- POSTÉ ----------------
@@ -87,10 +88,6 @@ def clean_text(text, max_len=500):
         text = text[:max_len] + "..."
     return text
 
-def escape_markdown(text: str) -> str:
-    escape_chars = r'\_*[]()~`>#+-=|{}.!'
-    return ''.join(f"\\{c}" if c in escape_chars else c for c in text)
-
 # ---------------- ANALYSE ----------------
 def analyze_content(title, summary):
     text = f"{title} {summary}".lower()
@@ -109,86 +106,81 @@ def generate_enriched_content(title, summary, source):
     clean_summary = clean_text(summary, max_len=400)
     clean_title = clean_text(title, max_len=80)
     
-    # Choix des accroches et emojis
     accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
     emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
     
-    # Hashtags
     hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
     
-    # Partie principale (résumé complet avec introduction)
     main_part = (
         f"<b><i>{escape(clean_title)}</i></b>\n\n"
         f"<blockquote>{escape(clean_summary)}</blockquote>\n\n"
     )
 
-    # Message final avec toutes les informations : titre, résumé, source, horaire, etc.
     message = (
-        f"{''.join(emojis)} {accroche}\n\n"  # Emojis et accroche
-        f"{main_part}"  # Partie principale avec titre et résumé
+        f"{''.join(emojis)} {accroche}\n\n"
+        f"{main_part}"
         f"📰 <b>Source :</b> <code>{escape(source or 'Média')}</code>\n"
         f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"
         f"📊 <b>Catégorie :</b> {main_cat.upper()}\n\n"
-        f"{hashtags}"  # Hashtags
+        f"{hashtags}"
     )
     
     return message
 
-# ---------------- IMAGE EXTRACTION ----------------
+# ---------------- IMAGE ----------------
 def extract_image(entry):
-    # 1️⃣ Vérifie media_content ou media_thumbnail
     if 'media_content' in entry:
         return entry.media_content[0].get('url')
     if 'media_thumbnail' in entry:
         return entry.media_thumbnail[0].get('url')
-    
-    # 2️⃣ Sinon cherche la première image dans le summary/description
     summary = entry.get('summary', '') or entry.get('description', '')
     soup = BeautifulSoup(summary, 'html.parser')
     img_tag = soup.find('img')
-    if img_tag and img_tag.get('src'):
-        return img_tag['src']
-    
-    # 3️⃣ Pas d'image trouvée
-    return None
+    return img_tag['src'] if img_tag else None
 
-# ---------------- POST NEWS ----------------
-async def post_to_channels(photo_url, message):
+# ---------------- POST ----------------
+async def post_to_channels(message, photo_url=None):
     for channel in CHANNELS:
         try:
             if photo_url:
-                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="HTML")
+                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_message(chat_id=channel, text=message, parse_mode="HTML")
+                await bot.send_message(chat_id=channel, text=message, parse_mode=ParseMode.HTML)
             logger.info(f"✅ Publié sur {channel}")
-        except TelegramError as e:
+        except Exception as e:
             logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(3, 6))
+        await asyncio.sleep(random.randint(3,6))
 
 # ---------------- RSS SCHEDULER ----------------
+async def fetch_feed(session, url):
+    async with session.get(url) as resp:
+        content = await resp.text()
+        loop = asyncio.get_event_loop()
+        feed = await loop.run_in_executor(None, lambda: feedparser.parse(content))
+        return feed
+
 async def rss_scheduler():
     async with aiohttp.ClientSession() as session:
         while True:
             for feed_url in RSS_FEEDS:
                 try:
-                    async with session.get(feed_url) as resp:
-                        content = await resp.text()
-                        feed = feedparser.parse(content)
-                        for entry in feed.entries:
-                            link = entry.get('link')
-                            if not link or link in posted_links:
-                                continue
-                            title = entry.get('title', '')
-                            summary = entry.get('summary', '') or entry.get('description', '')
-                            
-                            # 📸 Extraction automatique de l'image
-                            img_url = extract_image(entry)
-                            
-                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-                            await post_to_channels(img_url, msg)
-                            posted_links.add(link)
-                            save_posted_links()
-                            await asyncio.sleep(random.randint(5, 10))
+                    feed = await fetch_feed(session, feed_url)
+                    for entry in feed.entries:
+                        link = entry.get('link')
+                        if not link or link in posted_links:
+                            continue
+                        title = entry.get('title', '')
+                        summary = entry.get('summary', '') or entry.get('description', '')
+                        img_url = extract_image(entry)
+                        msg = generate_enriched_content(title, summary, feed.feed.get('title'))
+                        await post_to_channels(msg, img_url)
+                        posted_links.add(link)
+                        save_posted_links()
+                        await asyncio.sleep(random.randint(5,10))
                 except Exception as e:
                     logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-            await asyncio.sleep(900)  # Toutes les 15 minutes
+            await asyncio.sleep(900)  # Toutes les 15 min
+
+# ---------------- MAIN ----------------
+if __name__ == "__main__":
+    asyncio.run(rss_scheduler())

@@ -31,29 +31,29 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("CT_BOT")
+logger = logging.getLogger("CT_BOT_FR")
 
 bot = Bot(token=BOT_TOKEN)
 
 # ================= STYLE =================
 ACCROCHES = [
-    "🚀 <b>BREAKING CRYPTO</b>",
+    "🚀 <b>DERNIÈRES CRYPTO</b>",
     "📊 <b>MARCHÉ CRYPTO</b>",
-    "🔥 <b>ACTU BLOCKCHAIN</b>"
+    "🔥 <b>ACTUALITÉS BLOCKCHAIN</b>"
 ]
 
 HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
 
 COMMENTS = [
-    "💬 <i>Ton avis ?</i>",
-    "📊 <i>Bullish ou bearish ?</i>",
-    "🔥 <i>Impact réel selon toi ?</i>",
+    "💬 <i>Qu'en pensez-vous ?</i>",
+    "📊 <i>Haussier ou baissier selon vous ?</i>",
+    "🔥 <i>Quel impact réel ?</i>",
 ]
 
 POPULAR_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth",
-    "etf", "sec", "regulation", "adoption",
-    "crash", "hack", "institutional"
+    "etf", "sec", "régulation", "adoption",
+    "crash", "hack", "institutionnel"
 ]
 
 # ================= STORAGE =================
@@ -194,7 +194,7 @@ async def rss_loop():
 
 # ================= MAIN =================
 async def main():
-    logger.info("🤖 Bot Cointelegraph lancé")
+    logger.info("🤖 Bot Cointelegraph FR lancé")
     await rss_loop()
 
 if __name__ == "__main__":

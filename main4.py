@@ -10,7 +10,6 @@ from datetime import datetime
 
 import aiohttp
 from telegram import Bot
-from telegram.error import TelegramError
 from bs4 import BeautifulSoup
 
 # ================= CONFIG =================
@@ -18,7 +17,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "")
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-RSS_FEED = "https://cryptoast.fr/feed/"
+RSS_FEED = "https://fr.cointelegraph.com/rss"
+SOURCE_NAME = "Cointelegraph FR"
 
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
@@ -31,7 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("CRYPTOAST_FINAL")
+logger = logging.getLogger("CRYPTOBOT_FR")
 
 bot = Bot(token=BOT_TOKEN)
 
@@ -58,12 +58,12 @@ COMMENTS = [
 POPULAR_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth",
     "etf", "sec", "régulation",
-    "record", "hausse", "chute",
-    "crash", "hack", "faillite",
-    "institutionnel", "adoption"
+    "record", "hausse", "baisse",
+    "crash", "hack", "adoption",
+    "institution", "marché", "prix"
 ]
 
-MIN_TEXT_LENGTH = 300
+MIN_TEXT_LENGTH = 200
 
 # ================= STORAGE =================
 def load_posted():
@@ -102,9 +102,7 @@ def is_popular(title, summary):
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
-    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-    img = soup.find("img")
-    return img["src"] if img else None
+    return None
 
 async def download_crypto_image():
     url = "https://source.unsplash.com/1200x675/?cryptocurrency,bitcoin,blockchain"
@@ -124,9 +122,9 @@ def build_message(title, summary):
     hashtags = " ".join(random.sample(HASHTAGS, 3))
 
     msg = (
-        f"{accroche}*{clean_text(title, 80)}*\n\n"
-        f"{clean_text(summary)}\n\n"
-        f"📰 *Source :* Cryptoast\n"
+        f"{accroche}*{clean_text(title, 90)}*\n\n"
+        f"{clean_text(summary, 500)}\n\n"
+        f"📰 *Source :* {SOURCE_NAME}\n"
         f"🕒 *Heure :* {datetime.now().strftime('%H:%M')}\n\n"
         f"{hashtags}"
     )
@@ -143,7 +141,6 @@ async def post_with_comment(photo, message):
             with open(photo, "rb") as f:
                 sent = await bot.send_photo(channel, f, caption=message, parse_mode="MarkdownV2")
 
-        # 💬 commentaire NATIF (attaché au post)
         await bot.send_message(
             channel,
             random.choice(COMMENTS),
@@ -196,7 +193,7 @@ async def rss_loop():
 
 # ================= MAIN =================
 async def main():
-    logger.info("🤖 Bot Cryptoast FINAL lancé")
+    logger.info("🤖 Bot Cointelegraph FR lancé")
     await rss_loop()
 
 if __name__ == "__main__":

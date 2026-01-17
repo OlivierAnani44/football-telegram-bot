@@ -1,195 +1,196 @@
 import os
-import json
-import logging
-import random
-import asyncio
 import feedparser
+import json
+import asyncio
+import logging
 import re
-from datetime import datetime, date
-from telegram import Bot
-from telegram.constants import ParseMode
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from bs4 import BeautifulSoup
-from html import escape
+import random
+from datetime import datetime
+import aiohttp
 
-# ================= CONFIG =================
+# ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
+CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules
+CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
+# Flux RSS films/séries francophones
 RSS_FEEDS = [
-    "https://www.allocine.fr/rss/news.xml",
-    "https://www.seriesaddict.fr/rss/news.xml"
+    "https://www.allocine.fr/rss/news.xml",       # Actualités cinéma
+    "https://www.seriesaddict.fr/rss/news.xml"   # Actualités séries
 ]
 
 POSTED_FILE = "posted.json"
-STATS_FILE = "stats.json"
-
 MAX_POSTED_LINKS = 2500
-MAX_POSTS_PER_DAY = 10   # 🔥 LIMITE JOURNALIÈRE
-POST_INTERVAL = 300
-SCAN_INTERVAL = 300
 
-# ================= LOGGING =================
+# Logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
 )
-logger = logging.getLogger("RSS-BOT")
+logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
-
-# ================= UI =================
+# Emojis et phrases
 EMOJI_CATEGORIES = {
-    "sortie": ["🎬", "🍿", "🎥"],
-    "critique": ["⭐", "📝"],
-    "bande_annonce": ["▶️", "🎞️"],
-    "casting": ["🎭"],
-    "general": ["📰", "🔥"]
+    'sortie': ['🎬', '🍿', '✨', '🎥'],
+    'critique': ['⭐', '📝', '👍', '👎'],
+    'bande_annonce': ['🎞️', '▶️', '📽️'],
+    'casting': ['🎭', '👩‍🎤', '👨‍🎤'],
+    'general': ['📰', '🔥', '🚀', '💥']
 }
 
 PHRASES_ACCROCHE = {
-    "general": ["📰 INFO : ", "⚡ ACTU : "],
-    "sortie": ["🍿 Nouvelle sortie : "],
-    "critique": ["⭐ Critique : "],
-    "bande_annonce": ["▶️ Bande-annonce : "],
-    "casting": ["🎭 Casting : "]
+    'general': ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVELLE : "]
 }
 
-HASHTAGS = ["#Film", "#Série", "#Cinéma", "#Actu"]
+HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Sortie", "#BandeAnnonce"]
 
-# ================= STORAGE =================
-def load_posted():
-    if os.path.exists(POSTED_FILE):
-        with open(POSTED_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+# Bot
+bot = Bot(token=BOT_TOKEN)
+
+# ---------------- POSTÉ ----------------
+def load_posted_links():
+    try:
+        if os.path.exists(POSTED_FILE):
+            with open(POSTED_FILE, "r", encoding="utf-8") as f:
+                links = set(json.load(f))
+                if len(links) > MAX_POSTED_LINKS:
+                    links = set(list(links)[-MAX_POSTED_LINKS:])
+                logger.info(f"📁 {len(links)} liens chargés")
+                return links
+    except Exception as e:
+        logger.error(f"❌ Erreur chargement: {e}")
     return set()
 
-def save_posted():
-    clean = list(posted_links)[-MAX_POSTED_LINKS:]
-    with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(clean, f, ensure_ascii=False, indent=2)
+def save_posted_links():
+    try:
+        with open(POSTED_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(posted_links), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Erreur sauvegarde: {e}")
 
-def load_stats():
-    if os.path.exists(STATS_FILE):
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"date": str(date.today()), "count": 0}
+posted_links = load_posted_links()
 
-def save_stats():
-    with open(STATS_FILE, "w", encoding="utf-8") as f:
-        json.dump(stats, f, indent=2)
-
-posted_links = load_posted()
-stats = load_stats()
-
-# ================= UTILS =================
-def clean_text(text, limit):
+# ---------------- UTILITAIRES ----------------
+def clean_text(text, max_len=500):
     if not text:
         return ""
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit] + ("..." if len(text) > limit else "")
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return text
 
-def entry_uid(entry):
-    uid = entry.get("id") or entry.get("guid") or entry.get("link") or entry.get("title")
-    return uid.strip().lower()
+def escape_markdown(text: str) -> str:
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return ''.join(f"\\{c}" if c in escape_chars else c for c in text)
 
-# ================= ANALYSE =================
-def detect_category(title, summary):
-    t = f"{title} {summary}".lower()
-    if "bande" in t or "trailer" in t:
-        return "bande_annonce"
-    if "critique" in t:
-        return "critique"
-    if "casting" in t:
-        return "casting"
-    if "sortie" in t or "film" in t or "cinéma" in t:
-        return "sortie"
-    return "general"
+# ---------------- ANALYSE ----------------
+def analyze_content(title, summary):
+    text = f"{title} {summary}".lower()
+    if any(word in text for word in ["sortie", "film", "série", "cinéma"]):
+        return 'sortie'
+    if any(word in text for word in ["critique", "avis", "review"]):
+        return 'critique'
+    if any(word in text for word in ["bande-annonce", "trailer"]):
+        return 'bande_annonce'
+    if any(word in text for word in ["casting", "acteur", "actrice"]):
+        return 'casting'
+    return 'general'
 
-def build_message(title, summary, source):
-    cat = detect_category(title, summary)
-    return (
-        f"{random.choice(EMOJI_CATEGORIES[cat])} {random.choice(PHRASES_ACCROCHE[cat])}\n\n"
-        f"<b><i>{escape(clean_text(title, 80))}</i></b>\n\n"
-        f"<blockquote>{escape(clean_text(summary, 400))}</blockquote>\n\n"
-        f"📰 <b>Source :</b> <code>{escape(source)}</code>\n"
-        f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"
-        f"📊 <b>Catégorie :</b> {cat.upper()}\n\n"
-        f"{' '.join(HASHTAGS)}"
+def generate_enriched_content(title, summary, source):
+    main_cat = analyze_content(title, summary)
+    clean_summary = clean_text(summary)
+    clean_title = clean_text(title, max_len=80)
+    accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
+    emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
+    hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
+    source_name = source or "Média"
+    message = (
+        f"{''.join(emojis)} {accroche}*{clean_title}*\n\n"
+        f"{clean_summary}\n\n"
+        f"📰 *Source :* {source_name}\n"
+        f"🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n"
+        f"📊 *Catégorie :* {main_cat.upper()}\n\n"
+        f"{hashtags}"
     )
+    return escape_markdown(message)
 
-# ================= IMAGE =================
-def get_image(entry):
-    if "media_content" in entry:
-        return entry.media_content[0].get("url")
+# ---------------- IMAGE EXTRACTION ----------------
+def extract_image(entry):
+    # 1️⃣ Vérifie media_content ou media_thumbnail
+    if 'media_content' in entry:
+        return entry.media_content[0].get('url')
+    if 'media_thumbnail' in entry:
+        return entry.media_thumbnail[0].get('url')
+    
+    # 2️⃣ Sinon cherche la première image dans le summary/description
+    summary = entry.get('summary', '') or entry.get('description', '')
+    soup = BeautifulSoup(summary, 'html.parser')
+    img_tag = soup.find('img')
+    if img_tag and img_tag.get('src'):
+        return img_tag['src']
+    
+    # 3️⃣ Pas d'image trouvée
+    return None
 
-    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-    img = soup.find("img")
-    return img["src"] if img else None
-
-# ================= TELEGRAM =================
-async def publish(message, photo):
+# ---------------- POST NEWS ----------------
+async def post_to_channels(photo_url, message, button_url=None):
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Lire l'article", url=button_url)]]) if button_url else None
     for channel in CHANNELS:
-        await bot.send_photo(
-            chat_id=channel,
-            photo=photo,
-            caption=message,
-            parse_mode=ParseMode.HTML
-        )
-        await asyncio.sleep(3)
-
-# ================= LOOP =================
-async def rss_loop():
-    global stats
-
-    while True:
-        # 🔄 Reset journalier
-        if stats["date"] != str(date.today()):
-            stats = {"date": str(date.today()), "count": 0}
-            save_stats()
-
-        if stats["count"] >= MAX_POSTS_PER_DAY:
-            logger.info("⏸ Limite journalière atteinte")
-            await asyncio.sleep(SCAN_INTERVAL)
-            continue
-
         try:
-            for url in RSS_FEEDS:
-                feed = feedparser.parse(url)
+            if photo_url:
+                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+            else:
+                await bot.send_message(chat_id=channel, text=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+            logger.info(f"✅ Publié sur {channel}")
+        except TelegramError as e:
+            logger.error(f"❌ Telegram error {channel}: {e}")
+        await asyncio.sleep(random.randint(3,6))
 
-                for entry in feed.entries:
-                    uid = entry_uid(entry)
-                    image = get_image(entry)
+# ---------------- RSS SCHEDULER ----------------
+async def rss_scheduler():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for feed_url in RSS_FEEDS:
+                try:
+                    async with session.get(feed_url) as resp:
+                        content = await resp.text()
+                        feed = feedparser.parse(content)
+                        for entry in feed.entries:
+                            link = entry.get('link')
+                            if not link or link in posted_links:
+                                continue
+                            title = entry.get('title', '')
+                            summary = entry.get('summary', '') or entry.get('description', '')
+                            
+                            # 📸 Extraction automatique de l'image
+                            img_url = extract_image(entry)
+                            
+                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
+                            await post_to_channels(img_url, msg, button_url=link)
+                            posted_links.add(link)
+                            save_posted_links()
+                            await asyncio.sleep(random.randint(5,10))
+                except Exception as e:
+                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
+            await asyncio.sleep(900)  # Toutes les 15 minutes
 
-                    if uid in posted_links or not image:
-                        continue
+# ---------------- MAIN ----------------
+async def main():
+    logger.info("🤖 Bot Films/Séries démarré")
+    await rss_scheduler()
 
-                    posted_links.add(uid)
-                    save_posted()
-
-                    msg = build_message(
-                        entry.get("title", ""),
-                        entry.get("summary", ""),
-                        feed.feed.get("title", "Média")
-                    )
-
-                    await publish(msg, image)
-
-                    stats["count"] += 1
-                    save_stats()
-
-                    logger.info(f"✅ Publié ({stats['count']}/{MAX_POSTS_PER_DAY})")
-
-                    await asyncio.sleep(POST_INTERVAL)
-                    raise StopIteration
-        except StopIteration:
-            pass
-        except Exception as e:
-            logger.error(f"RSS error : {e}")
-
-        await asyncio.sleep(SCAN_INTERVAL)
-
-# ================= MAIN =================
 if __name__ == "__main__":
-    asyncio.run(rss_loop())
+    if not BOT_TOKEN or not CHANNELS:
+        logger.error("❌ BOT_TOKEN et CHANNELS requis")
+        exit(1)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Arrêt propre")

@@ -10,19 +10,18 @@ from datetime import datetime
 
 import aiohttp
 from telegram import Bot
+from telegram.error import TelegramError
 from bs4 import BeautifulSoup
-import argostranslate.translate
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "")
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-RSS_FEED = "https://cointelegraph.com/rss"
+RSS_FEED = "https://cryptoast.fr/feed/"
+
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
-
-MIN_DELAY = 300  # 5 minutes minimum
 MAX_POSTED = 3000
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -32,30 +31,39 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("CT_BOT_FR")
+logger = logging.getLogger("CRYPTOAST_FINAL")
 
 bot = Bot(token=BOT_TOKEN)
 
 # ================= STYLE =================
 ACCROCHES = [
-    "🚀 DERNIÈRES ACTUALITÉS CRYPTO",
-    "📊 MARCHÉ CRYPTO",
-    "🔥 INFOS BLOCKCHAIN"
+    "🔥 ACTU CRYPTO : ",
+    "🚀 BREAKING : ",
+    "📊 MARCHÉ : "
 ]
 
-HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
+HASHTAGS = [
+    "#Crypto", "#Bitcoin", "#Ethereum",
+    "#Blockchain", "#Web3"
+]
 
 COMMENTS = [
-    "💬 Qu'en pensez-vous ?",
-    "📊 Haussier ou baissier selon vous ?",
-    "🔥 Quel est l’impact réel ?",
+    "💬 Qu’en pensez-vous ?",
+    "📊 Bullish ou bearish selon vous ?",
+    "🔥 Impact réel sur le marché ?",
+    "🤔 Bonne ou mauvaise nouvelle ?",
+    "🪙 On en discute 👇"
 ]
 
 POPULAR_KEYWORDS = [
     "bitcoin", "btc", "ethereum", "eth",
-    "etf", "sec", "régulation", "adoption",
-    "crash", "hack", "institutionnel"
+    "etf", "sec", "régulation",
+    "record", "hausse", "chute",
+    "crash", "hack", "faillite",
+    "institutionnel", "adoption"
 ]
+
+MIN_TEXT_LENGTH = 300
 
 # ================= STORAGE =================
 def load_posted():
@@ -69,7 +77,7 @@ def load_posted():
 
 def save_posted():
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2)
+        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2, ensure_ascii=False)
 
 posted_links = load_posted()
 
@@ -80,42 +88,30 @@ def clean_text(text, max_len=600):
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:max_len] + "..." if len(text) > max_len else text
 
-def highlight_keywords(text):
-    for kw in POPULAR_KEYWORDS:
-        text = re.sub(
-            rf"\b({kw})\b",
-            r"<b>\1</b>",
-            text,
-            flags=re.IGNORECASE
-        )
-    return text
+def escape_md(text):
+    chars = r'\_*[]()~`>#+-=|{}.!'
+    return ''.join(f"\\{c}" if c in chars else c for c in text)
 
-# ================= TRANSLATION =================
-def translate_to_french(text):
-    try:
-        installed_languages = argostranslate.translate.get_installed_languages()
-        from_lang = next(lang for lang in installed_languages if lang.code == "en")
-        to_lang = next(lang for lang in installed_languages if lang.code == "fr")
-        translation = from_lang.get_translation(to_lang)
-        return translation.translate(text)
-    except Exception as e:
-        logger.warning(f"❌ Traduction échouée: {e}")
-        return text  # fallback
+# ================= POPULAR FILTER =================
+def is_popular(title, summary):
+    text = f"{title} {summary}".lower()
+    hits = sum(1 for k in POPULAR_KEYWORDS if k in text)
+    return hits >= 2 and len(text) >= MIN_TEXT_LENGTH
 
 # ================= IMAGE =================
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
-    if "media_thumbnail" in entry:
-        return entry.media_thumbnail[0].get("url")
-    return None
+    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
+    img = soup.find("img")
+    return img["src"] if img else None
 
 async def download_crypto_image():
-    url = "https://source.unsplash.com/1200x675/?crypto,bitcoin"
+    url = "https://source.unsplash.com/1200x675/?cryptocurrency,bitcoin,blockchain"
     filename = f"{IMAGE_DIR}/{uuid.uuid4().hex}.jpg"
 
     async with aiohttp.ClientSession() as s:
-        async with s.get(url) as r:
+        async with s.get(url, timeout=15) as r:
             if r.status == 200:
                 with open(filename, "wb") as f:
                     f.write(await r.read())
@@ -124,40 +120,38 @@ async def download_crypto_image():
 
 # ================= MESSAGE =================
 def build_message(title, summary):
-    # Traduction
-    title_fr = translate_to_french(title)
-    summary_fr = translate_to_french(summary)
-
-    # Nettoyage et mise en forme
-    title_fr = highlight_keywords(clean_text(title_fr, 120))
-    summary_fr = highlight_keywords(clean_text(summary_fr, 500))
-
     accroche = random.choice(ACCROCHES)
     hashtags = " ".join(random.sample(HASHTAGS, 3))
 
-    # Message plus naturel
-    message = f"{accroche}\n\n<b>{title_fr}</b>\n\n{summary_fr}\n\n"
-    message += f"📌 <b>Détails techniques</b> : <code>source=Cointelegraph | type=crypto_actualité</code>\n"
-    message += f"⏰ <i>{datetime.now().strftime('%H:%M')}</i>\n\n{hashtags}"
-
-    return message
+    msg = (
+        f"{accroche}*{clean_text(title, 80)}*\n\n"
+        f"{clean_text(summary)}\n\n"
+        f"📰 *Source :* Cryptoast\n"
+        f"🕒 *Heure :* {datetime.now().strftime('%H:%M')}\n\n"
+        f"{hashtags}"
+    )
+    return escape_md(msg)
 
 # ================= TELEGRAM =================
-async def post(channel, photo, message):
-    if photo and photo.startswith("http"):
-        sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
-    elif photo:
-        with open(photo, "rb") as f:
-            sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
-    else:
-        sent = await bot.send_message(channel, message, parse_mode="HTML")
+async def post_with_comment(photo, message):
+    for channel in CHANNELS:
+        sent = None
 
-    await bot.send_message(
-        channel,
-        random.choice(COMMENTS),
-        reply_to_message_id=sent.message_id,
-        parse_mode="HTML"
-    )
+        if photo.startswith("http"):
+            sent = await bot.send_photo(channel, photo, caption=message, parse_mode="MarkdownV2")
+        else:
+            with open(photo, "rb") as f:
+                sent = await bot.send_photo(channel, f, caption=message, parse_mode="MarkdownV2")
+
+        # 💬 commentaire NATIF (attaché au post)
+        await bot.send_message(
+            channel,
+            random.choice(COMMENTS),
+            reply_to_message_id=sent.message_id
+        )
+
+        logger.info(f"✅ Post + commentaire publié sur {channel}")
+        await asyncio.sleep(random.randint(8, 12))
 
 # ================= LOOP =================
 async def rss_loop():
@@ -168,23 +162,24 @@ async def rss_loop():
                     feed = feedparser.parse(await r.text())
 
                     for entry in feed.entries:
-                        uid = entry.get("id") or entry.get("link")
+                        uid = entry.get("id") or entry.get("title")
                         if not uid or uid in posted_links:
                             continue
 
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
 
+                        if not is_popular(title, summary):
+                            continue
+
                         img = extract_image(entry)
                         temp = None
+
                         if not img:
                             temp = await download_crypto_image()
 
                         msg = build_message(title, summary)
-
-                        for ch in CHANNELS:
-                            await post(ch, img or temp, msg)
-                            await asyncio.sleep(2)
+                        await post_with_comment(img or temp, msg)
 
                         posted_links.add(uid)
                         save_posted()
@@ -192,17 +187,16 @@ async def rss_loop():
                         if temp and os.path.exists(temp):
                             os.remove(temp)
 
-                        logger.info("✅ Article publié")
-                        await asyncio.sleep(MIN_DELAY)
+                        await asyncio.sleep(random.randint(12, 18))
 
             except Exception as e:
-                logger.error(f"❌ Erreur RSS : {e}")
+                logger.error(f"❌ RSS error: {e}")
 
-            await asyncio.sleep(60)
+            await asyncio.sleep(900)
 
 # ================= MAIN =================
 async def main():
-    logger.info("🤖 Bot Cointelegraph FR lancé")
+    logger.info("🤖 Bot Cryptoast FINAL lancé")
     await rss_loop()
 
 if __name__ == "__main__":

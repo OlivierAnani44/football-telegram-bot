@@ -19,8 +19,16 @@ CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()
 # Flux RSS football
 RSS_FEEDS = [
     "https://www.lequipe.fr/rss/actu_rss_Football.xml",       # L'Équipe Foot
-    "https://www.footmercato.net/rss/actus"                   # Foot Mercato
+    "https://www.footmercato.net/rss/actus",                 # Foot Mercato
+    "https://www.foot01.com/rss/actus.xml",                  # Foot01
+    "https://www.sofoot.com/feed",                           # SoFoot
+    "https://www.futbol24.com/rss/rss.xml",                  # Futbol24
+    "https://www.goal.com/fr/feeds/news?fmt=rss",            # Goal FR
+    "https://www.fifa.com/rss/index.xml",                    # FIFA News
+    "https://www.uefa.com/rssfeed/uefaeuropeanleagues/rss.xml", # UEFA Europe
+    "https://www.90min.com/feeds/news"                       # 90min
 ]
+
 
 POSTED_FILE = "posted.json"
 MAX_POSTED_LINKS = 2500

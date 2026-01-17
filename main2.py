@@ -181,4 +181,14 @@ async def rss_scheduler():
                             title = entry.get('title', '')
                             summary = entry.get('summary', '') or entry.get('description', '')
                             
-                            # 📸 Extraction automatique de l
+                            # 📸 Extraction automatique de l'image
+                            img_url = extract_image(entry)
+                            
+                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
+                            await post_to_channels(img_url, msg)
+                            posted_links.add(link)
+                            save_posted_links()
+                            await asyncio.sleep(random.randint(5, 10))
+                except Exception as e:
+                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
+            await asyncio.sleep(900)  # Toutes les 15 minutes

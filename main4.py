@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "")
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-RSS_FEED = "https://cointelegraph.com/rss"
+RSS_FEED = "https://fr.cointelegraph.com/rss"
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
 

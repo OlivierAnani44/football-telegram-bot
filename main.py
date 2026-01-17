@@ -1,3 +1,5 @@
+POSTED_FILE = "posted.json"
+print("POSTED_FILE =", POSTED_FILE)
 import os
 import json
 import logging

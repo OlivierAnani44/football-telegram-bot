@@ -12,12 +12,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
 CHANNELS_RAW = os.getenv("CHANNELS")
 
+POSTED_FILE = "posted.json"   # ✅ DOIT ÊTRE AVANT load_posted()
+
 if not all([API_ID, API_HASH, BOT_TOKEN, SOURCE_CHANNEL, CHANNELS_RAW]):
     raise RuntimeError("❌ Variables d'environnement manquantes")
 
 API_ID = int(API_ID)
 
-# SOURCE CHANNEL (id ou @username)
+# SOURCE CHANNEL
 if SOURCE_CHANNEL.startswith("@"):
     SOURCE_CHANNEL = SOURCE_CHANNEL
 else:
@@ -104,4 +106,3 @@ async def handler(client, message):
 if __name__ == "__main__":
     logger.info("🤖 Bot démarré et en écoute...")
     app.run()
-

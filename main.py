@@ -10,13 +10,26 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
-CHANNELS = os.getenv("CHANNELS", "")
+CHANNELS = []
+for c in os.getenv("CHANNELS", "").split(","):
+    c = c.strip()
+    if not c:
+        continue
+    if c.startswith("@"):
+        CHANNELS.append(c)
+    else:
+        CHANNELS.append(int(c))
+
 
 if not all([API_ID, API_HASH, BOT_TOKEN, SOURCE_CHANNEL, CHANNELS]):
     raise RuntimeError("❌ Variables d'environnement manquantes")
 
 API_ID = int(API_ID)
-SOURCE_CHANNEL = int(SOURCE_CHANNEL)
+if SOURCE_CHANNEL.startswith("@"):
+    SOURCE_CHANNEL = SOURCE_CHANNEL
+else:
+    SOURCE_CHANNEL = int(SOURCE_CHANNEL)
+
 CHANNELS = [int(c.strip()) for c in CHANNELS.split(",") if c.strip()]
 
 POSTED_FILE = "posted.json"

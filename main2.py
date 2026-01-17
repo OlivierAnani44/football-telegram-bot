@@ -17,15 +17,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-# Flux RSS Allociné uniquement
 RSS_FEEDS = [
-    "https://www.allocine.fr/rss/news.xml"  # Actualités cinéma
+    "https://www.allocine.fr/rss/news.xml"
 ]
 
 POSTED_FILE = "posted.json"
 MAX_POSTED_LINKS = 2500
 
-# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -33,7 +31,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Emojis et phrases
 EMOJI_CATEGORIES = {
     'sortie': ['🎬', '🍿', '✨', '🎥'],
     'critique': ['⭐', '📝', '👍', '👎'],
@@ -48,27 +45,25 @@ PHRASES_ACCROCHE = {
 
 HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Sortie", "#BandeAnnonce"]
 
-# Bot
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- POSTÉ ----------------
+# ---------------- POSTÉ PAR CANAL ----------------
 def load_posted_links():
     try:
         if os.path.exists(POSTED_FILE):
             with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                links = set(json.load(f))
-                if len(links) > MAX_POSTED_LINKS:
-                    links = set(list(links)[-MAX_POSTED_LINKS:])
-                logger.info(f"📁 {len(links)} liens chargés")
-                return links
+                data = json.load(f)
+                # S'assurer que chaque channel est un set
+                return {ch: set(links) for ch, links in data.items()}
     except Exception as e:
         logger.error(f"❌ Erreur chargement: {e}")
-    return set()
+    return {ch: set() for ch in CHANNELS}
 
 def save_posted_links():
     try:
         with open(POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(posted_links), f, ensure_ascii=False, indent=2)
+            json.dump({ch: list(links) for ch, links in posted_links.items()},
+                      f, ensure_ascii=False, indent=2)
     except Exception as e:
         logger.error(f"❌ Erreur sauvegarde: {e}")
 
@@ -89,7 +84,6 @@ def clean_text(text, max_len=500):
 def escape_html(text: str) -> str:
     return html_escape(text)
 
-# ---------------- ANALYSE ----------------
 def analyze_content(title, summary):
     text = f"{title} {summary}".lower()
     if any(word in text for word in ["sortie", "film", "série", "cinéma"]):
@@ -104,14 +98,11 @@ def analyze_content(title, summary):
 
 def generate_enriched_content(title, summary, source):
     main_cat = analyze_content(title, summary)
-
     clean_summary = escape_html(clean_text(summary))
     clean_title = escape_html(clean_text(title, max_len=80))
-
     accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
     emoji = random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))
     hashtags = ' '.join(HASHTAGS_FR)
-
     source_name = escape_html(source or "Média")
     heure = datetime.now().strftime('%H:%M')
 
@@ -129,19 +120,16 @@ def generate_enriched_content(title, summary, source):
 
     return message
 
-# ---------------- IMAGE EXTRACTION ----------------
 def extract_image(entry):
     if 'media_content' in entry:
         return entry.media_content[0].get('url')
     if 'media_thumbnail' in entry:
         return entry.media_thumbnail[0].get('url')
-    
     summary = entry.get('summary', '') or entry.get('description', '')
     soup = BeautifulSoup(summary, 'html.parser')
     img_tag = soup.find('img')
     if img_tag and img_tag.get('src'):
         return img_tag['src']
-    
     return None
 
 # ---------------- POST NEWS ----------------
@@ -151,6 +139,9 @@ async def post_to_channels(photo_url, message, button_url=None):
     ) if button_url else None
 
     for channel in CHANNELS:
+        if button_url in posted_links.get(channel, set()):
+            logger.info(f"⏩ Déjà posté dans {channel}, passage au suivant")
+            continue
         try:
             if photo_url:
                 await bot.send_photo(
@@ -167,6 +158,8 @@ async def post_to_channels(photo_url, message, button_url=None):
                     parse_mode="HTML",
                     reply_markup=keyboard
                 )
+            posted_links[channel].add(button_url)
+            save_posted_links()
             logger.info(f"✅ Publié sur {channel}")
         except TelegramError as e:
             logger.error(f"❌ Telegram error {channel}: {e}")
@@ -187,18 +180,19 @@ async def rss_scheduler():
 
                         for entry in feed.entries:
                             link = entry.get('link')
-                            if not link or link in posted_links:
+                            if not link:
+                                continue
+
+                            # ⚡ Vérifie si déjà posté dans tous les canaux
+                            if all(link in posted_links.get(ch, set()) for ch in CHANNELS):
                                 continue
 
                             title = entry.get('title', '')
                             summary = entry.get('summary', '') or entry.get('description', '')
-
                             img_url = extract_image(entry)
                             msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-                            await post_to_channels(img_url, msg, button_url=link)
 
-                            posted_links.add(link)
-                            save_posted_links()
+                            await post_to_channels(img_url, msg, button_url=link)
 
                             # Intervalle variable entre posts
                             await asyncio.sleep(intervals[idx % len(intervals)])

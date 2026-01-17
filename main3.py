@@ -1,152 +1,152 @@
-import os
-import json
-import logging
-import random
-import asyncio
-import aiohttp
-import feedparser
-import re
-from datetime import datetime
-from telegram import Bot
-from telegram.constants import ParseMode
+import os, asyncio, aiohttp, json, logging, random
 from bs4 import BeautifulSoup
-from html import escape
+from telegram import Bot
+from datetime import datetime
 
-# ================= CONFIG =================
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS").split(",") if c.strip()]
+LIVE_URL = "https://www.flashscore.com/"
+POSTED_FILE = "posted_live.json"
 
-RSS_FEEDS = [
-    "https://www.lequipe.fr/rss/actu_rss_Football.xml",
-    "https://www.footmercato.net/rss/actus",
-    "https://www.foot01.com/rss/actus.xml",
-    "https://www.sofoot.com/feed",
-    "https://www.goal.com/fr/feeds/news?fmt=rss",
-    "https://www.90min.com/feeds/news",
-    "https://feeds.bbci.co.uk/sport/football/rss.xml"
+DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
+
+ALLOWED_LEAGUES = [
+    "Premier League", "LaLiga", "Serie A",
+    "Bundesliga", "Ligue 1", "Champions League", "CAF"
 ]
 
-POSTED_FILE = "posted.json"
-MAX_POSTED_LINKS = 3000
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
-
-# ================= LOGS =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+bot = Bot(token=BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FootballUltimateBot")
 
-logger.info("⚽ BOT FOOTBALL ULTIME DÉMARRÉ")
-
-# ================= BOT =================
-bot = Bot(token=BOT_TOKEN)
-
-# ================= STOCKAGE =================
-def load_posted():
+# ---------------- STORAGE ----------------
+def load_data():
     if os.path.exists(POSTED_FILE):
         with open(POSTED_FILE, "r", encoding="utf-8") as f:
             return set(json.load(f))
     return set()
 
-def save_posted():
+def save_data(data):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_links), f, ensure_ascii=False)
+        json.dump(list(data), f)
 
-posted_links = load_posted()
+posted = load_data()
 
-# ================= UTILS =================
-def clean_text(text, limit=400):
-    if not text:
-        return ""
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit] + "..." if len(text) > limit else text
+# ---------------- PRONOSTIC ----------------
+def pronostic(sh, sa):
+    if sh > sa:
+        res = "1️⃣ Victoire Domicile"
+        cote = "1.45"
+    elif sa > sh:
+        res = "2️⃣ Victoire Extérieur"
+        cote = "2.90"
+    else:
+        res = "❌ Match Nul"
+        cote = "3.10"
 
-def extract_image(entry):
-    if "media_content" in entry:
-        return entry.media_content[0].get("url")
-    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
-    img = soup.find("img")
-    return img["src"] if img else None
+    btts = "✅ OUI" if sh > 0 and sa > 0 else "❌ NON"
+    over = "🔼 Over 2.5" if sh + sa >= 3 else "🔽 Under 2.5"
 
-# ================= ANALYSE =================
-def detect_category(title):
-    t = title.lower()
-    if any(w in t for w in ["transfert", "mercato", "signature"]):
-        return "🔄 TRANSFERT"
-    if any(w in t for w in ["victoire", "défaite", "score", "but"]):
-        return "📊 RÉSULTAT"
-    if any(w in t for w in ["match", "face à", "contre"]):
-        return "⚽ MATCH"
-    return "📰 ACTU FOOT"
+    return res, cote, btts, over
 
-def build_message(entry, source):
-    title = clean_text(entry.get("title", ""), 90)
-    summary = clean_text(entry.get("summary", ""), 420)
-    category = detect_category(title)
+# ---------------- SCRAP ----------------
+async def scrape(session):
+    async with session.get(LIVE_URL, headers={"User-Agent": "Mozilla/5.0"}) as r:
+        soup = BeautifulSoup(await r.text(), "html.parser")
+        matches = []
+
+        for m in soup.select(".event__match"):
+            try:
+                league = m.find_previous("div", class_="event__title").text.strip()
+                if not any(l in league for l in ALLOWED_LEAGUES):
+                    continue
+
+                home = m.select_one(".event__participant--home").text.strip()
+                away = m.select_one(".event__participant--away").text.strip()
+                sh = int(m.select_one(".event__score--home").text)
+                sa = int(m.select_one(".event__score--away").text)
+                minute = m.select_one(".event__stage").text.strip()
+
+                matches.append({
+                    "home": home,
+                    "away": away,
+                    "sh": sh,
+                    "sa": sa,
+                    "minute": minute,
+                    "league": league
+                })
+            except:
+                continue
+
+        return matches
+
+# ---------------- MESSAGE ----------------
+def build_message(m, event):
+    res, cote, btts, over = pronostic(m["sh"], m["sa"])
 
     return (
-        f"{category}\n\n"
-        f"<b>{escape(title)}</b>\n\n"
-        f"<blockquote>{escape(summary)}</blockquote>\n\n"
-        f"📰 <b>Source :</b> {escape(source)}\n"
-        f"🕒 <b>Heure :</b> {datetime.now().strftime('%H:%M')}\n\n"
-        "#Football #Foot #ActuFoot"
+        f"⚽ *{event}*\n\n"
+        f"🏆 *{m['league']}*\n\n"
+        f"⚔️ *{m['home']}* {m['sh']} – {m['sa']} *{m['away']}*\n"
+        f"⏱ {m['minute']}\n\n"
+        f"🧠 *Pronostics Live*\n"
+        f"{res} | 💰 Cote ~ {cote}\n"
+        f"BTTS : {btts}\n"
+        f"{over}\n\n"
+        f"🕒 {datetime.now().strftime('%H:%M')}\n"
+        f"#Football #Live #Pronostic"
     )
 
-# ================= POST =================
-async def post(message, photo=None):
+# ---------------- POST ----------------
+async def post(photo, text):
     for ch in CHANNELS:
-        try:
-            if photo:
-                await bot.send_photo(ch, photo=photo, caption=message, parse_mode=ParseMode.HTML)
-            else:
-                await bot.send_message(ch, message, parse_mode=ParseMode.HTML)
-            logger.info(f"✅ Publié sur {ch}")
-        except Exception as e:
-            logger.error(f"❌ Telegram erreur {ch}: {e}")
-        await asyncio.sleep(4)
+        await bot.send_photo(
+            chat_id=ch,
+            photo=photo,
+            caption=text,
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(2)
 
-# ================= FETCH RSS =================
-async def fetch_feed(session, url):
-    async with session.get(url, headers=HEADERS, timeout=20) as r:
-        text = await r.text()
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: feedparser.parse(text))
-
-# ================= MAIN LOOP =================
-async def rss_loop():
+# ---------------- LOOP ----------------
+async def live_loop():
     async with aiohttp.ClientSession() as session:
         while True:
-            for url in RSS_FEEDS:
-                try:
-                    feed = await fetch_feed(session, url)
-                    logger.info(f"📡 {url} → {len(feed.entries)} articles")
+            matches = await scrape(session)
 
-                    for entry in feed.entries[:5]:  # limite anti-spam
-                        link = entry.get("link")
-                        if not link or link in posted_links:
-                            continue
+            for m in matches:
+                base_key = f"{m['home']}-{m['away']}"
 
-                        msg = build_message(entry, feed.feed.get("title", "Football"))
-                        img = extract_image(entry)
+                # ⚽ BUT
+                goal_key = f"{base_key}-{m['sh']}-{m['sa']}"
+                if goal_key not in posted:
+                    await post(DEFAULT_IMAGE, build_message(m, "BUT ⚽"))
+                    posted.add(goal_key)
+                    save_data(posted)
 
-                        await post(msg, img)
-                        posted_links.add(link)
-                        save_posted()
-                        await asyncio.sleep(6)
+                # ⏸ MI-TEMPS
+                if "HT" in m["minute"]:
+                    ht_key = f"{base_key}-HT"
+                    if ht_key not in posted:
+                        await post(DEFAULT_IMAGE, build_message(m, "MI-TEMPS ⏸"))
+                        posted.add(ht_key)
+                        save_data(posted)
 
-                except Exception as e:
-                    logger.error(f"❌ RSS erreur {url}: {e}")
+                # 🏁 FIN
+                if "FT" in m["minute"]:
+                    ft_key = f"{base_key}-FT"
+                    if ft_key not in posted:
+                        await post(DEFAULT_IMAGE, build_message(m, "FIN DU MATCH 🏁"))
+                        posted.add(ft_key)
+                        save_data(posted)
 
-            logger.info("⏳ Pause 10 minutes")
-            await asyncio.sleep(600)
+            await asyncio.sleep(60)
 
-# ================= START =================
+# ---------------- MAIN ----------------
+async def main():
+    logger.info("⚽ BOT FOOTBALL ULTIME DÉMARRÉ")
+    await live_loop()
+
 if __name__ == "__main__":
-    asyncio.run(rss_loop())
+    asyncio.run(main())

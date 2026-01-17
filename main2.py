@@ -176,10 +176,13 @@ async def rss_scheduler():
                         await post_to_channels(msg, img_url)
                         posted_links.add(link)
                         save_posted_links()
-                        await asyncio.sleep(random.randint(5,10))
+                        # On attend 5 minutes minimum avant le prochain post
+                        await asyncio.sleep(300)
                 except Exception as e:
                     logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-            await asyncio.sleep(900)  # Toutes les 15 min
+            # On attend 5 minutes avant de re-vérifier tous les flux
+            await asyncio.sleep(300)
+
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":

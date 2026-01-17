@@ -61,14 +61,17 @@ def load_posted():
     if os.path.exists(POSTED_FILE):
         try:
             with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                data = json.load(f)
+                # format: {"channel_id": ["link1", "link2", ...], ...}
+                return {ch: set(lst) for ch, lst in data.items()}
         except:
             pass
-    return set()
+    return {ch: set() for ch in CHANNELS}
 
 def save_posted():
+    data = {ch: list(posted_links[ch])[-MAX_POSTED:] for ch in posted_links}
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2)
+        json.dump(data, f, indent=2)
 
 posted_links = load_posted()
 
@@ -136,20 +139,25 @@ def build_message(title, summary):
 
 # ================= TELEGRAM =================
 async def post(channel, photo, message):
-    if photo and photo.startswith("http"):
-        sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
-    elif photo:
-        with open(photo, "rb") as f:
-            sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
-    else:
-        sent = await bot.send_message(channel, message, parse_mode="HTML")
+    try:
+        if photo and photo.startswith("http"):
+            sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
+        elif photo:
+            with open(photo, "rb") as f:
+                sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
+        else:
+            sent = await bot.send_message(channel, message, parse_mode="HTML")
 
-    await bot.send_message(
-        channel,
-        random.choice(COMMENTS),
-        reply_to_message_id=sent.message_id,
-        parse_mode="HTML"
-    )
+        await bot.send_message(
+            channel,
+            random.choice(COMMENTS),
+            reply_to_message_id=sent.message_id,
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"❌ Erreur en postant sur {channel} : {e}")
+        return False
 
 # ================= LOOP =================
 async def rss_loop():
@@ -161,12 +169,11 @@ async def rss_loop():
 
                     for entry in feed.entries:
                         uid = entry.get("id") or entry.get("link")
-                        if not uid or uid in posted_links:
+                        if not uid:
                             continue
 
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
-
                         img = extract_image(entry)
                         temp = None
                         if not img:
@@ -174,17 +181,24 @@ async def rss_loop():
 
                         msg = build_message(title, summary)
 
+                        posted_somewhere = False
                         for ch in CHANNELS:
-                            await post(ch, img or temp, msg)
-                            await asyncio.sleep(2)
+                            if uid in posted_links.get(ch, set()):
+                                logger.info(f"⏭ Article déjà posté sur {ch}, passage au suivant")
+                                continue
 
-                        posted_links.add(uid)
-                        save_posted()
+                            success = await post(ch, img or temp, msg)
+                            if success:
+                                posted_links[ch].add(uid)
+                                posted_somewhere = True
+                                await asyncio.sleep(2)
 
-                        if temp and os.path.exists(temp):
-                            os.remove(temp)
+                        if posted_somewhere:
+                            save_posted()
+                            if temp and os.path.exists(temp):
+                                os.remove(temp)
+                            logger.info("✅ Article publié sur au moins un canal")
 
-                        logger.info("✅ Article publié")
                         await asyncio.sleep(MIN_DELAY)
 
             except Exception as e:

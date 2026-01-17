@@ -5,229 +5,169 @@ import asyncio
 import logging
 import re
 import random
-import uuid
 from datetime import datetime
-
-import aiohttp
 from telegram import Bot
+from telegram.error import TelegramError
 from bs4 import BeautifulSoup
+import aiohttp
 
-# ================= CONFIG =================
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = os.getenv("CHANNELS", "")
-CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
 RSS_FEEDS = [
     "https://www.allocine.fr/rss/news.xml",
-    "https://www.allocine.fr/rss/series.xml"
+    "https://www.seriesaddict.fr/rss/news.xml"
 ]
 
-SOURCE_NAME = "Allociné"
-
 POSTED_FILE = "posted.json"
-IMAGE_DIR = "images"
-MAX_POSTED = 3000
-
-os.makedirs(IMAGE_DIR, exist_ok=True)
-
-# ================= LOG =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("ALLOCINE_BOT")
+MAX_POSTED_LINKS = 2500
+MIN_POST_INTERVAL = 300  # ⏱️ 5 minutes minimum entre chaque post
 
 bot = Bot(token=BOT_TOKEN)
 
-# ================= STYLE =================
-ACCROCHES = [
-    "🎬 ACTU CINÉ : ",
-    "📺 ACTU SÉRIE : ",
-    "🔥 BREAKING CULTURE : ",
-    "🍿 À NE PAS MANQUER : "
+# ---------------- LOGGING ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# ---------------- DATA ----------------
+EMOJI_CATEGORIES = {
+    "sortie": ["🎬", "🍿", "🎥"],
+    "critique": ["⭐", "📝"],
+    "bande_annonce": ["▶️", "🎞️"],
+    "casting": ["🎭"],
+    "general": ["📰", "🔥"]
+}
+
+PHRASES_ACCROCHE = {
+    "general": ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVEAUTÉ : "]
+}
+
+HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Actu", "#PopCulture"]
+
+ENGAGEMENT_PHRASES = [
+    "💬 *Votre avis nous intéresse !*\n👇 Dites-nous ce que vous en pensez",
+    "🗣️ *Débat ouvert !*\n👇 Réagissez en commentaire",
+    "🍿 *Alors, verdict ?*\n👇 On en parle juste en dessous",
+    "🔥 *Ça fait réagir ?*\n👇 Laissez votre avis"
 ]
 
-HASHTAGS = [
-    "#Cinema", "#Series", "#Netflix",
-    "#Films", "#Streaming", "#Allocine"
-]
+CATEGORY_QUESTIONS = {
+    "sortie": ["🎬 Vous attendez cette sortie ?", "🍿 Hâte ou pas ?"],
+    "critique": ["⭐ Vous êtes d’accord avec cette critique ?", "📝 Quelle note lui donneriez-vous ?"],
+    "bande_annonce": ["▶️ Cette bande-annonce vous convainc ?", "🎞️ Ça donne envie ?"],
+    "casting": ["🎭 Bon choix de casting selon vous ?", "🤔 Casting réussi ?"],
+    "general": ["📰 Qu’en pensez-vous ?", "🤔 Votre avis ?"]
+}
 
-COMMENTS = [
-    "🎥 Vous allez le regarder ?",
-    "🍿 Hâte ou pas du tout ?",
-    "🤔 Votre avis ?",
-    "🔥 Succès ou flop selon vous ?",
-    "📺 On en parle 👇"
-]
-
-POPULAR_KEYWORDS = [
-    "film", "série", "saison", "bande-annonce",
-    "trailer", "netflix", "amazon", "disney",
-    "sortie", "acteur", "actrice", "réalisateur",
-    "box-office", "cinéma", "streaming"
-]
-
-MIN_TEXT_LENGTH = 120
-
-# ================= STORAGE =================
+# ---------------- STORAGE ----------------
 def load_posted():
     if os.path.exists(POSTED_FILE):
-        try:
-            with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except:
-            pass
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
     return set()
 
 def save_posted():
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_links)[-MAX_POSTED:], f, indent=2, ensure_ascii=False)
+        json.dump(list(posted_links)[-MAX_POSTED_LINKS:], f, ensure_ascii=False, indent=2)
 
 posted_links = load_posted()
+last_post_time = 0
 
-# ================= TEXT =================
-def clean_text(text, max_len=600):
-    text = BeautifulSoup(text or "", "html.parser").get_text()
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text[:max_len] + "..." if len(text) > max_len else text
-
+# ---------------- UTILS ----------------
 def escape_md(text):
-    chars = r'\_*[]()~`>#+-=|{}.!'
-    return ''.join(f"\\{c}" if c in chars else c for c in text)
+    return re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', text)
 
-# ================= FILTER =================
-def is_popular(title, summary):
-    text = f"{title} {summary}".lower()
-    hits = sum(1 for k in POPULAR_KEYWORDS if k in text)
-    return hits >= 1 and len(text) >= MIN_TEXT_LENGTH
+def clean_text(text, max_len=500):
+    text = re.sub(r"<[^>]+>", "", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len] + ("..." if len(text) > max_len else "")
 
-# ================= IMAGE =================
+def analyze(title, summary):
+    t = f"{title} {summary}".lower()
+    if "bande" in t or "trailer" in t:
+        return "bande_annonce"
+    if "critique" in t or "avis" in t:
+        return "critique"
+    if "casting" in t or "acteur" in t:
+        return "casting"
+    if "sortie" in t or "film" in t or "série" in t:
+        return "sortie"
+    return "general"
+
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
-
     soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
     img = soup.find("img")
     return img["src"] if img else None
 
-async def download_fallback_image():
-    url = "https://source.unsplash.com/1200x675/?cinema,movie,series"
-    filename = f"{IMAGE_DIR}/{uuid.uuid4().hex}.jpg"
-
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=15) as r:
-                if r.status == 200:
-                    with open(filename, "wb") as f:
-                        f.write(await r.read())
-                    return filename
-    except:
-        pass
-
-    return None
-
-# ================= MESSAGE =================
-def build_message(title, summary):
-    accroche = random.choice(ACCROCHES)
-    hashtags = " ".join(random.sample(HASHTAGS, 3))
+# ---------------- MESSAGE ----------------
+def generate_message(title, summary, source):
+    cat = analyze(title, summary)
 
     msg = (
-        f"{accroche}*{clean_text(title, 90)}*\n\n"
-        f"{clean_text(summary, 500)}\n\n"
-        f"📰 *Source :* {SOURCE_NAME}\n"
-        f"🕒 *Heure :* {datetime.now().strftime('%H:%M')}\n\n"
-        f"{hashtags}"
+        f"{random.choice(EMOJI_CATEGORIES[cat])} "
+        f"{random.choice(PHRASES_ACCROCHE['general'])}"
+        f"*{clean_text(title, 80)}*\n\n"
+        f"{clean_text(summary)}\n\n"
+        f"📰 *Source :* {source}\n"
+        f"🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n"
+        f"📊 *Catégorie :* {cat.upper()}\n\n"
+        f"❓ *{random.choice(CATEGORY_QUESTIONS[cat])}*\n"
+        f"{random.choice(ENGAGEMENT_PHRASES)}\n\n"
+        f"{' '.join(HASHTAGS_FR)}"
     )
     return escape_md(msg)
 
-# ================= TELEGRAM =================
-async def post_with_comment(photo, message):
+# ---------------- POST ----------------
+async def post(photo, text):
     for channel in CHANNELS:
+        try:
+            if photo:
+                await bot.send_photo(channel, photo=photo, caption=text, parse_mode="MarkdownV2")
+            else:
+                await bot.send_message(channel, text=text, parse_mode="MarkdownV2")
+            logger.info(f"✅ Posté sur {channel}")
+        except TelegramError as e:
+            logger.error(e)
 
-        # Image URL
-        if isinstance(photo, str) and photo.startswith("http"):
-            sent = await bot.send_photo(
-                channel,
-                photo,
-                caption=message,
-                parse_mode="MarkdownV2"
-            )
+# ---------------- SCHEDULER ----------------
+async def scheduler():
+    global last_post_time
 
-        # Image locale
-        elif isinstance(photo, str) and os.path.exists(photo):
-            with open(photo, "rb") as f:
-                sent = await bot.send_photo(
-                    channel,
-                    f,
-                    caption=message,
-                    parse_mode="MarkdownV2"
-                )
-
-        # Aucun visuel → texte
-        else:
-            sent = await bot.send_message(
-                channel,
-                message,
-                parse_mode="MarkdownV2"
-            )
-
-        # Commentaire attaché
-        await bot.send_message(
-            channel,
-            random.choice(COMMENTS),
-            reply_to_message_id=sent.message_id
-        )
-
-        logger.info(f"✅ Actu publiée sur {channel}")
-        await asyncio.sleep(random.randint(8, 12))
-
-# ================= LOOP =================
-async def rss_loop():
     async with aiohttp.ClientSession() as session:
         while True:
-            try:
-                for feed_url in RSS_FEEDS:
-                    async with session.get(feed_url, timeout=20) as r:
-                        feed = feedparser.parse(await r.text())
+            for feed_url in RSS_FEEDS:
+                async with session.get(feed_url) as r:
+                    feed = feedparser.parse(await r.text())
 
-                        for entry in feed.entries:
-                            uid = entry.get("id") or entry.get("link") or entry.get("title")
-                            if not uid or uid in posted_links:
-                                continue
+                for entry in feed.entries:
+                    if time.time() - last_post_time < MIN_POST_INTERVAL:
+                        continue
 
-                            title = entry.get("title", "")
-                            summary = entry.get("summary", "")
+                    link = entry.get("link")
+                    if not link or link in posted_links:
+                        continue
 
-                            if not is_popular(title, summary):
-                                continue
+                    msg = generate_message(
+                        entry.get("title", ""),
+                        entry.get("summary", ""),
+                        feed.feed.get("title", "Média")
+                    )
 
-                            img = extract_image(entry)
-                            temp = None
+                    await post(extract_image(entry), msg)
 
-                            if not img:
-                                temp = await download_fallback_image()
+                    posted_links.add(link)
+                    save_posted()
+                    last_post_time = time.time()
 
-                            msg = build_message(title, summary)
-                            await post_with_comment(img or temp, msg)
+                    break  # ⛔ UN SEUL POST MAX
 
-                            posted_links.add(uid)
-                            save_posted()
+            await asyncio.sleep(60)
 
-                            if temp and os.path.exists(temp):
-                                os.remove(temp)
-
-                            await asyncio.sleep(random.randint(12, 18))
-
-            except Exception as e:
-                logger.error(f"❌ RSS error: {e}")
-
-            await asyncio.sleep(600)
-
-# ================= MAIN =================
-async def main():
-    logger.info("🤖 Bot Films & Séries Allociné lancé")
-    await rss_loop()
-
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
-    asyncio.run(main())
+    import time
+    logger.info("🤖 Bot démarré")
+    asyncio.run(scheduler())

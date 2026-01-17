@@ -11,6 +11,7 @@ from datetime import datetime
 import aiohttp
 from telegram import Bot
 from bs4 import BeautifulSoup
+import argostranslate.translate
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -37,17 +38,17 @@ bot = Bot(token=BOT_TOKEN)
 
 # ================= STYLE =================
 ACCROCHES = [
-    "🚀 <b>DERNIÈRES ACTUALITÉS CRYPTO</b>",
-    "📊 <b>MARCHÉ CRYPTO</b>",
-    "🔥 <b>INFOS BLOCKCHAIN</b>"
+    "🚀 DERNIÈRES ACTUALITÉS CRYPTO",
+    "📊 MARCHÉ CRYPTO",
+    "🔥 INFOS BLOCKCHAIN"
 ]
 
 HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
 
 COMMENTS = [
-    "💬 <i>Qu'en pensez-vous ?</i>",
-    "📊 <i>Haussier ou baissier selon vous ?</i>",
-    "🔥 <i>Quel est l’impact réel ?</i>",
+    "💬 Qu'en pensez-vous ?",
+    "📊 Haussier ou baissier selon vous ?",
+    "🔥 Quel est l’impact réel ?",
 ]
 
 POPULAR_KEYWORDS = [
@@ -89,6 +90,18 @@ def highlight_keywords(text):
         )
     return text
 
+# ================= TRANSLATION =================
+def translate_to_french(text):
+    try:
+        installed_languages = argostranslate.translate.get_installed_languages()
+        from_lang = next(lang for lang in installed_languages if lang.code == "en")
+        to_lang = next(lang for lang in installed_languages if lang.code == "fr")
+        translation = from_lang.get_translation(to_lang)
+        return translation.translate(text)
+    except Exception as e:
+        logger.warning(f"❌ Traduction échouée: {e}")
+        return text  # fallback
+
 # ================= IMAGE =================
 def extract_image(entry):
     if "media_content" in entry:
@@ -111,28 +124,23 @@ async def download_crypto_image():
 
 # ================= MESSAGE =================
 def build_message(title, summary):
+    # Traduction
+    title_fr = translate_to_french(title)
+    summary_fr = translate_to_french(summary)
+
+    # Nettoyage et mise en forme
+    title_fr = highlight_keywords(clean_text(title_fr, 120))
+    summary_fr = highlight_keywords(clean_text(summary_fr, 500))
+
     accroche = random.choice(ACCROCHES)
     hashtags = " ".join(random.sample(HASHTAGS, 3))
 
-    title = highlight_keywords(clean_text(title, 100))
-    summary = highlight_keywords(clean_text(summary))
+    # Message plus naturel
+    message = f"{accroche}\n\n<b>{title_fr}</b>\n\n{summary_fr}\n\n"
+    message += f"📌 <b>Détails techniques</b> : <code>source=Cointelegraph | type=crypto_actualité</code>\n"
+    message += f"⏰ <i>{datetime.now().strftime('%H:%M')}</i>\n\n{hashtags}"
 
-    return f"""
-{accroche}
-
-<u><b>{title}</b></u>
-
-<blockquote>
-<i>{summary}</i>
-</blockquote>
-
-📌 <b>Détails techniques</b> :
-<code>source=Cointelegraph | type=crypto_actualité</code>
-
-⏰ <i>{datetime.now().strftime('%H:%M')}</i>
-
-{hashtags}
-"""
+    return message
 
 # ================= TELEGRAM =================
 async def post(channel, photo, message):

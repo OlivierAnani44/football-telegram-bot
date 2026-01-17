@@ -21,7 +21,7 @@ RSS_FEED = "https://cointelegraph.com/rss"
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
 
-MIN_DELAY = 300  # 5 minutes
+MIN_DELAY = 300  # 5 minutes minimum
 MAX_POSTED = 3000
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -37,9 +37,9 @@ bot = Bot(token=BOT_TOKEN)
 
 # ================= STYLE =================
 ACCROCHES = [
-    "🚀 <b>DERNIÈRES CRYPTO</b>",
+    "🚀 <b>DERNIÈRES ACTUALITÉS CRYPTO</b>",
     "📊 <b>MARCHÉ CRYPTO</b>",
-    "🔥 <b>ACTUALITÉS BLOCKCHAIN</b>"
+    "🔥 <b>INFOS BLOCKCHAIN</b>"
 ]
 
 HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
@@ -47,7 +47,7 @@ HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
 COMMENTS = [
     "💬 <i>Qu'en pensez-vous ?</i>",
     "📊 <i>Haussier ou baissier selon vous ?</i>",
-    "🔥 <i>Quel impact réel ?</i>",
+    "🔥 <i>Quel est l’impact réel ?</i>",
 ]
 
 POPULAR_KEYWORDS = [
@@ -127,7 +127,7 @@ def build_message(title, summary):
 </blockquote>
 
 📌 <b>Détails techniques</b> :
-<code>source=Cointelegraph | type=crypto_news</code>
+<code>source=Cointelegraph | type=crypto_actualité</code>
 
 ⏰ <i>{datetime.now().strftime('%H:%M')}</i>
 

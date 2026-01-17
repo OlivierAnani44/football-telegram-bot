@@ -6,184 +6,172 @@ import asyncio
 import aiohttp
 import feedparser
 import re
+import hashlib
+import time
 from datetime import datetime
 from telegram import Bot
 from telegram.constants import ParseMode
 from bs4 import BeautifulSoup
 from html import escape
 
-# ---------------- CONFIGURATION ----------------
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
+MAX_POSTS_PER_HOUR = int(os.getenv("MAX_POSTS_PER_HOUR", "6"))
+FILTER_KEYWORDS = [k.strip().lower() for k in os.getenv("FILTER_KEYWORDS", "").split(",") if k]
 
 RSS_FEEDS = [
-    "https://www.allocine.fr/rss/news.xml",       # Actualités cinéma
-    "https://www.seriesaddict.fr/rss/news.xml"   # Actualités séries
+    "https://www.allocine.fr/rss/news.xml",
+    "https://www.seriesaddict.fr/rss/news.xml"
 ]
 
 POSTED_FILE = "posted.json"
 MAX_POSTED_LINKS = 2500
 
-# Logging
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("RSS-BOT")
 
-# ---------------- EMOJIS / PHRASES ----------------
-EMOJI_CATEGORIES = {
-    'sortie': ['🎬', '🍿', '✨', '🎥'],
-    'critique': ['⭐', '📝', '👍', '👎'],
-    'bande_annonce': ['🎞️', '▶️', '📽️'],
-    'casting': ['🎭', '👩‍🎤', '👨‍🎤'],
-    'general': ['📰', '🔥', '🚀', '💥']
-}
-
-PHRASES_ACCROCHE = {
-    'general': ["📰 INFO : ", "⚡ ACTU : ", "🔥 NOUVELLE : "],
-    'sortie': ["🍿 Nouvelle sortie : ", "🎬 À l'affiche : "],
-    'critique': ["⭐ Critique : ", "📝 Avis : "],
-    'bande_annonce': ["▶️ Bande-annonce : ", "🎞️ Trailer : "],
-    'casting': ["🎭 Casting : ", "👩‍🎤👨‍🎤 Annonce : "]
-}
-
-HASHTAGS_FR = ["#Film", "#Série", "#Cinéma", "#Sortie", "#BandeAnnonce"]
-
-# ---------------- BOT ----------------
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- POSTÉ ----------------
-def load_posted_links():
-    try:
-        if os.path.exists(POSTED_FILE):
-            with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                links = set(json.load(f))
-                if len(links) > MAX_POSTED_LINKS:
-                    links = set(list(links)[-MAX_POSTED_LINKS:])
-                logger.info(f"📁 {len(links)} liens chargés")
-                return links
-    except Exception as e:
-        logger.error(f"❌ Erreur chargement: {e}")
+# ---------------- EMOJIS ----------------
+EMOJI = ["📰", "🔥", "🎬", "🍿", "⭐", "🎞️", "🚀"]
+
+HASHTAGS = ["#Film", "#Serie", "#Cinema", "#Actu"]
+
+# ---------------- POSTED ----------------
+def load_posted():
+    if os.path.exists(POSTED_FILE):
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
     return set()
 
-def save_posted_links():
-    try:
-        with open(POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(posted_links), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde: {e}")
+def save_posted():
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(posted_links)[-MAX_POSTED_LINKS:], f, ensure_ascii=False)
 
-posted_links = load_posted_links()
+posted_links = load_posted()
+POST_TIMESTAMPS = []
 
-# ---------------- UTILITAIRES ----------------
-def clean_text(text, max_len=500):
+# ---------------- UTILS ----------------
+def clean_text(text, max_len=400):
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    if len(text) > max_len:
-        text = text[:max_len] + "..."
-    return text
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len] + ("..." if len(text) > max_len else "")
 
-# ---------------- ANALYSE ----------------
-def analyze_content(title, summary):
+def make_uid(entry, feed_url):
+    base = (
+        entry.get("title", "") +
+        entry.get("summary", "") +
+        entry.get("published", "") +
+        feed_url
+    )
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+def can_post():
+    now = time.time()
+    POST_TIMESTAMPS[:] = [t for t in POST_TIMESTAMPS if now - t < 3600]
+    return len(POST_TIMESTAMPS) < MAX_POSTS_PER_HOUR
+
+def keyword_allowed(title, summary):
+    if not FILTER_KEYWORDS:
+        return True
     text = f"{title} {summary}".lower()
-    if any(word in text for word in ["sortie", "film", "série", "cinéma"]):
-        return 'sortie'
-    if any(word in text for word in ["critique", "avis", "review"]):
-        return 'critique'
-    if any(word in text for word in ["bande-annonce", "trailer"]):
-        return 'bande_annonce'
-    if any(word in text for word in ["casting", "acteur", "actrice"]):
-        return 'casting'
-    return 'general'
-
-def generate_enriched_content(title, summary, source):
-    main_cat = analyze_content(title, summary)
-    clean_summary = clean_text(summary, max_len=400)
-    clean_title = clean_text(title, max_len=80)
-    
-    accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
-    emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
-    
-    hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
-    
-    main_part = (
-        f"<b><i>{escape(clean_title)}</i></b>\n\n"
-        f"<blockquote>{escape(clean_summary)}</blockquote>\n\n"
-    )
-
-    message = (
-        f"{''.join(emojis)} {accroche}\n\n"
-        f"{main_part}"
-        f"📰 <b>Source :</b> <code>{escape(source or 'Média')}</code>\n"
-        f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"
-        f"📊 <b>Catégorie :</b> {main_cat.upper()}\n\n"
-        f"{hashtags}"
-    )
-    
-    return message
+    return any(k in text for k in FILTER_KEYWORDS)
 
 # ---------------- IMAGE ----------------
 def extract_image(entry):
-    if 'media_content' in entry:
-        return entry.media_content[0].get('url')
-    if 'media_thumbnail' in entry:
-        return entry.media_thumbnail[0].get('url')
-    summary = entry.get('summary', '') or entry.get('description', '')
-    soup = BeautifulSoup(summary, 'html.parser')
-    img_tag = soup.find('img')
-    return img_tag['src'] if img_tag else None
+    if "media_content" in entry:
+        return entry.media_content[0].get("url")
+    summary = entry.get("summary", "")
+    soup = BeautifulSoup(summary, "html.parser")
+    img = soup.find("img")
+    return img["src"] if img else None
 
-# ---------------- POST ----------------
-async def post_to_channels(message, photo_url=None):
+# ---------------- MESSAGE ----------------
+def build_message(title, summary, source):
+    title = escape(clean_text(title, 80))
+    summary = escape(clean_text(summary, 350))
+    emoji = random.choice(EMOJI)
+    hashtags = " ".join(random.sample(HASHTAGS, min(len(HASHTAGS), 4)))
+
+    return (
+        f"{emoji} <b>ACTU</b>\n\n"
+        f"<b><i>{title}</i></b>\n\n"
+        f"<blockquote>{summary}</blockquote>\n\n"
+        f"📰 <b>Source :</b> <code>{escape(source)}</code>\n"
+        f"🕒 <b>{datetime.now().strftime('%H:%M')}</b>\n\n"
+        f"{hashtags}"
+    )
+
+# ---------------- TELEGRAM ----------------
+async def post(message, image=None):
     for channel in CHANNELS:
         try:
-            if photo_url:
-                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode=ParseMode.HTML)
+            if image:
+                await bot.send_photo(channel, image, caption=message, parse_mode=ParseMode.HTML)
             else:
-                await bot.send_message(chat_id=channel, text=message, parse_mode=ParseMode.HTML)
-            logger.info(f"✅ Publié sur {channel}")
+                await bot.send_message(channel, message, parse_mode=ParseMode.HTML)
+            logger.info(f"✅ Posté sur {channel}")
         except Exception as e:
-            logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(3,6))
+            logger.error(f"❌ Telegram {channel} : {e}")
+        await asyncio.sleep(random.randint(3, 6))
 
-# ---------------- RSS SCHEDULER ----------------
+# ---------------- RSS ----------------
 async def fetch_feed(session, url):
-    async with session.get(url) as resp:
-        content = await resp.text()
-        loop = asyncio.get_event_loop()
-        feed = await loop.run_in_executor(None, lambda: feedparser.parse(content))
-        return feed
+    async with session.get(url, timeout=20) as r:
+        data = await r.text()
+        return feedparser.parse(data)
 
-async def rss_scheduler():
+async def rss_loop():
     async with aiohttp.ClientSession() as session:
         while True:
-            for feed_url in RSS_FEEDS:
-                try:
+            try:
+                for feed_url in RSS_FEEDS:
                     feed = await fetch_feed(session, feed_url)
-                    for entry in feed.entries:
-                        link = entry.get('link')
-                        if not link or link in posted_links:
-                            continue
-                        title = entry.get('title', '')
-                        summary = entry.get('summary', '') or entry.get('description', '')
-                        img_url = extract_image(entry)
-                        msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-                        await post_to_channels(msg, img_url)
-                        posted_links.add(link)
-                        save_posted_links()
-                        # On attend 5 minutes minimum avant le prochain post
-                        await asyncio.sleep(300)
-                except Exception as e:
-                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-            # On attend 5 minutes avant de re-vérifier tous les flux
-            await asyncio.sleep(300)
 
+                    for entry in feed.entries:
+                        uid = make_uid(entry, feed_url)
+
+                        if uid in posted_links:
+                            continue
+
+                        title = entry.get("title", "")
+                        summary = entry.get("summary", "")
+
+                        if not keyword_allowed(title, summary):
+                            continue
+
+                        if not can_post():
+                            logger.warning("⏳ Limite horaire atteinte")
+                            break
+
+                        img = extract_image(entry)
+                        msg = build_message(title, summary, feed.feed.get("title", "Média"))
+
+                        await post(msg, img)
+
+                        posted_links.add(uid)
+                        POST_TIMESTAMPS.append(time.time())
+                        save_posted()
+
+                        # ✅ 1 POST PAR CYCLE
+                        await asyncio.sleep(300)
+                        break
+
+                await asyncio.sleep(300)
+
+            except Exception as e:
+                logger.error(f"🔥 Crash évité : {e}")
+                await asyncio.sleep(60)
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
-    asyncio.run(rss_scheduler())
+    logger.info("🤖 Bot RSS démarré")
+    asyncio.run(rss_loop())

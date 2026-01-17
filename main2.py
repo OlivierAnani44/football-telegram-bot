@@ -17,12 +17,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = os.getenv("CHANNELS", "")
 CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
-# RSS Allociné actualités cinéma
-RSS_FEED = "https://www.allocine.fr/feeds/news.xml"
+RSS_FEED = "https://www.allocine.fr/feeds/news.xml"  # RSS Allociné actualités cinéma
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
 
-MIN_DELAY = 300  # 5 minutes
+MIN_DELAY = 300  # 5 minutes entre chaque post
 MAX_POSTED = 3000
 
 os.makedirs(IMAGE_DIR, exist_ok=True)

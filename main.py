@@ -17,9 +17,9 @@ SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
 CHANNELS_RAW = os.getenv("CHANNELS")
 
 # Configuration supplémentaire
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))  # Intervalle de vérification en secondes
-MAX_MESSAGES_PER_CHECK = int(os.getenv("MAX_MESSAGES_PER_CHECK", "50"))  # Messages à vérifier par scan
-FILTER_KEYWORDS = os.getenv("FILTER_KEYWORDS", "").lower().split(",")  # Mots-clés à filtrer
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 minutes par défaut
+MAX_MESSAGES_PER_CHECK = int(os.getenv("MAX_MESSAGES_PER_CHECK", "20"))
+FILTER_KEYWORDS = os.getenv("FILTER_KEYWORDS", "").lower().split(",")
 
 if not all([API_ID, API_HASH, BOT_TOKEN, SOURCE_CHANNEL, CHANNELS_RAW]):
     raise RuntimeError("❌ Variables d'environnement manquantes")
@@ -58,10 +58,7 @@ def load_posted():
         try:
             with open(POSTED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Vérifier si c'est une liste ou un dict
-                if isinstance(data, dict):
-                    return set(data.get("posted_ids", []))
-                return set(data)
+                return set(data.get("posted_ids", []))
         except Exception as e:
             logger.error(f"❌ Erreur lecture {POSTED_FILE}: {e}")
             return set()
@@ -69,7 +66,6 @@ def load_posted():
 
 def save_posted():
     try:
-        # Sauvegarder avec structure améliorée
         data = {
             "posted_ids": list(posted),
             "last_check": time.time(),
@@ -91,11 +87,9 @@ def should_filter_message(text):
     
     text_low = text.lower()
     
-    # Filtres de base
     if "http" in text_low or "aten10" in text_low:
         return True
     
-    # Filtres par mots-clés personnalisés
     if FILTER_KEYWORDS and any(keyword in text_low for keyword in FILTER_KEYWORDS if keyword):
         return True
     
@@ -112,40 +106,56 @@ def extract_message_content(message):
     else:
         return "[Contenu média sans texte]"
 
-# ---------------- BOT ----------------
-app = Client(
-    name="forward_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True,
-    workers=100
-)
-
-# ---------------- HANDLER EN TEMPS RÉEL ----------------
-@app.on_message(filters.chat(SOURCE_CHANNEL_ID if SOURCE_CHANNEL_ID else SOURCE_CHANNEL_USERNAME))
-async def realtime_handler(client, message):
-    """Gère les messages en temps réel (si le bot est dans le canal)"""
-    msg_id = f"{message.chat.id}:{message.id}"
+# ---------------- GESTION FLOOD WAIT ----------------
+async def safe_start_client():
+    """Démarre le client avec gestion FloodWait"""
+    max_retries = 3
+    retry_delay = 5
     
-    if msg_id in posted:
-        logger.debug(f"📭 Message {msg_id} déjà traité")
-        return
+    for attempt in range(max_retries):
+        try:
+            app = Client(
+                name="forward_bot_session",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                bot_token=BOT_TOKEN,
+                in_memory=True,
+                workers=50
+            )
+            
+            await app.start()
+            logger.info("✅ Client démarré avec succès")
+            return app
+            
+        except FloodWait as e:
+            wait_time = e.value
+            logger.warning(f"⏳ FloodWait détecté: {wait_time} secondes")
+            
+            if attempt < max_retries - 1:
+                logger.info(f"🔄 Nouvelle tentative dans {wait_time} secondes...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"❌ Trop de tentatives, attente de {wait_time} secondes")
+                await asyncio.sleep(wait_time)
+                # Dernière tentative
+                app = Client(
+                    name="forward_bot_session_final",
+                    api_id=API_ID,
+                    api_hash=API_HASH,
+                    bot_token=BOT_TOKEN,
+                    in_memory=True
+                )
+                await app.start()
+                return app
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur démarrage client (tentative {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                raise e
     
-    text = extract_message_content(message)
-    logger.info(f"📩 Message reçu en temps réel: {message.id}")
-    logger.debug(f"Contenu: {text[:100]}...")
-    
-    if should_filter_message(text):
-        logger.info(f"⏭️ Message {message.id} filtré, ignoré")
-        posted.add(msg_id)
-        save_posted()
-        return
-    
-    await forward_to_channels(client, message, text)
-    
-    posted.add(msg_id)
-    save_posted()
+    raise Exception("Échec démarrage client après plusieurs tentatives")
 
 # ---------------- FONCTION DE FORWARD ----------------
 async def forward_to_channels(client, message, text):
@@ -154,12 +164,11 @@ async def forward_to_channels(client, message, text):
     
     for idx, channel in enumerate(CHANNELS):
         try:
-            # Différentes méthodes selon le type de message
             if message.photo:
                 await client.send_photo(
                     chat_id=channel,
                     photo=message.photo.file_id,
-                    caption=text[:1024] if text else None  # Limite de caption
+                    caption=text[:1024] if text else None
                 )
             elif message.video:
                 await client.send_video(
@@ -173,12 +182,6 @@ async def forward_to_channels(client, message, text):
                     document=message.document.file_id,
                     caption=text[:1024] if text else None
                 )
-            elif message.animation:  # GIF
-                await client.send_animation(
-                    chat_id=channel,
-                    animation=message.animation.file_id,
-                    caption=text[:1024] if text else None
-                )
             elif message.text:
                 await client.send_message(
                     chat_id=channel,
@@ -186,36 +189,28 @@ async def forward_to_channels(client, message, text):
                     disable_web_page_preview=True
                 )
             else:
-                # Pour les autres types de média
                 await message.copy(chat_id=channel)
             
             success_count += 1
             logger.info(f"✅ Envoyé vers {channel}")
             
-            # Pause anti-flood entre chaque envoi
-            if idx < len(CHANNELS) - 1:  # Pas de pause après le dernier
-                await asyncio.sleep(1)  # Pause de 1 seconde
+            if idx < len(CHANNELS) - 1:
+                await asyncio.sleep(1)
         
         except FloodWait as e:
             logger.warning(f"⏳ FloodWait {channel}, attente {e.value} secondes")
             await asyncio.sleep(e.value)
-            # Réessayer après l'attente
-            try:
-                await message.copy(chat_id=channel)
-                success_count += 1
-                logger.info(f"✅ Envoyé vers {channel} après FloodWait")
-            except Exception as retry_e:
-                logger.error(f"❌ Erreur retry {channel}: {retry_e}")
-        
+            continue
+            
         except Exception as e:
             logger.error(f"❌ Erreur {channel}: {e}")
     
-    logger.info(f"📊 Résumé: {success_count}/{len(CHANNELS)} canaux atteints")
+    logger.info(f"📊 {success_count}/{len(CHANNELS)} canaux atteints")
 
-# ---------------- SCAN PERIODIQUE (BACKUP) ----------------
-async def periodic_scanner():
-    """Scanne périodiquement le canal source pour les messages manqués"""
-    logger.info("🔄 Démarrage du scanner périodique")
+# ---------------- SCAN PERIODIQUE ----------------
+async def periodic_scanner(app):
+    """Scanne périodiquement le canal source"""
+    logger.info("🔄 Scanner périodique démarré")
     
     while True:
         try:
@@ -223,30 +218,35 @@ async def periodic_scanner():
             
             logger.info("🔍 Scanner périodique en cours...")
             
-            # Récupérer les derniers messages du canal
+            # Vérifier si le client est connecté
+            if not app.is_connected:
+                logger.warning("⚠️ Client déconnecté, tentative reconnexion...")
+                await app.stop()
+                await asyncio.sleep(5)
+                app = await safe_start_client()
+            
+            # Récupérer les messages
             try:
                 if SOURCE_CHANNEL_ID:
-                    messages = await app.get_chat_history(
-                        chat_id=SOURCE_CHANNEL_ID,
+                    messages = app.get_chat_history(
+                        SOURCE_CHANNEL_ID,
                         limit=MAX_MESSAGES_PER_CHECK
                     )
                 else:
-                    messages = await app.get_chat_history(
-                        chat_id=SOURCE_CHANNEL_USERNAME,
+                    messages = app.get_chat_history(
+                        SOURCE_CHANNEL_USERNAME,
                         limit=MAX_MESSAGES_PER_CHECK
                     )
             except Exception as e:
-                logger.error(f"❌ Impossible d'accéder au canal source: {e}")
+                logger.error(f"❌ Erreur récupération messages: {e}")
                 continue
             
             new_messages = 0
-            
-            # Traiter les messages du plus récent au plus ancien
             async for message in messages:
                 msg_id = f"{message.chat.id}:{message.id}"
                 
                 if msg_id in posted:
-                    continue  # Déjà traité
+                    continue
                 
                 text = extract_message_content(message)
                 
@@ -254,105 +254,171 @@ async def periodic_scanner():
                     posted.add(msg_id)
                     continue
                 
-                logger.info(f"📥 Message historique trouvé: {message.id}")
+                logger.info(f"📥 Message historique: {message.id}")
                 await forward_to_channels(app, message, text)
                 
                 posted.add(msg_id)
                 new_messages += 1
-                
-                # Petite pause pour éviter le flood
                 await asyncio.sleep(0.5)
             
             if new_messages > 0:
                 save_posted()
-                logger.info(f"📈 {new_messages} nouveaux messages traités par scan")
+                logger.info(f"📈 {new_messages} nouveaux messages traités")
+            
+        except FloodWait as e:
+            logger.warning(f"⏳ FloodWait scanner: {e.value} secondes")
+            await asyncio.sleep(e.value)
             
         except Exception as e:
             logger.error(f"❌ Erreur scanner: {e}")
-            await asyncio.sleep(30)  # Attendre en cas d'erreur
+            await asyncio.sleep(30)
 
-# ---------------- DÉMARRAGE AVEC SCANNER ----------------
+# ---------------- HANDLER TEMPS RÉEL ----------------
+@app.on_message(filters.chat(SOURCE_CHANNEL_ID if SOURCE_CHANNEL_ID else SOURCE_CHANNEL_USERNAME))
+async def realtime_handler(client, message):
+    """Gère les messages en temps réel"""
+    msg_id = f"{message.chat.id}:{message.id}"
+    
+    if msg_id in posted:
+        return
+    
+    text = extract_message_content(message)
+    logger.info(f"📩 Message temps réel: {message.id}")
+    
+    if should_filter_message(text):
+        posted.add(msg_id)
+        save_posted()
+        return
+    
+    await forward_to_channels(client, message, text)
+    
+    posted.add(msg_id)
+    save_posted()
+
+# ---------------- COMMANDES ----------------
 @app.on_message(filters.command("start"))
 async def start_command(client, message):
-    """Commande /start pour vérifier l'état du bot"""
     status_msg = (
         f"🤖 Bot de republication actif\n\n"
         f"**Canal source:** `{SOURCE_CHANNEL}`\n"
         f"**Canaux destination:** `{len(CHANNELS)}`\n"
         f"**Messages traités:** `{len(posted)}`\n"
-        f"**Intervalle de scan:** `{CHECK_INTERVAL}s`\n\n"
-        f"Le bot surveille le canal et republie les messages "
-        f"qui ne contiennent pas de liens HTTP ou de mots filtrés."
+        f"**Intervalle scan:** `{CHECK_INTERVAL}s`"
     )
     await message.reply(status_msg)
 
 @app.on_message(filters.command("stats"))
 async def stats_command(client, message):
-    """Commande /stats pour afficher les statistiques"""
     stats_msg = (
-        f"📊 **Statistiques du bot**\n\n"
+        f"📊 **Statistiques**\n\n"
         f"• Messages traités: `{len(posted)}`\n"
-        f"• Canaux de destination: `{len(CHANNELS)}`\n"
-        f"• Intervalle de scan: `{CHECK_INTERVAL}s`\n"
+        f"• Canaux destination: `{len(CHANNELS)}`\n"
         f"• Dernière sauvegarde: `{time.ctime()}`"
     )
     await message.reply(stats_msg)
 
 # ---------------- MAIN ----------------
 async def main():
-    """Fonction principale"""
+    """Fonction principale avec gestion robuste"""
     logger.info("=" * 50)
     logger.info("🤖 Bot de republication démarré")
     logger.info(f"📡 Canal source: {SOURCE_CHANNEL}")
     logger.info(f"🎯 Canaux destination: {len(CHANNELS)}")
-    logger.info(f"⏱️ Intervalle de scan: {CHECK_INTERVAL}s")
+    logger.info(f"⏱️ Intervalle scan: {CHECK_INTERVAL}s")
     logger.info("=" * 50)
     
-    # Démarrer le scanner périodique en tâche de fond
-    scanner_task = asyncio.create_task(periodic_scanner())
+    # Attendre un peu avant de démarrer (pour éviter FloodWait immédiat)
+    initial_wait = int(os.getenv("INITIAL_WAIT", "10"))
+    logger.info(f"⏳ Attente initiale de {initial_wait} secondes...")
+    await asyncio.sleep(initial_wait)
     
-    # Démarrer le client
-    await app.start()
+    # Démarrer le client avec gestion FloodWait
+    app = await safe_start_client()
     
-    # Afficher les infos du bot
-    bot_info = await app.get_me()
-    logger.info(f"Bot connecté: @{bot_info.username}")
-    
-    # Vérifier l'accès au canal source
+    # Vérifier l'accès au canal
     try:
         if SOURCE_CHANNEL_ID:
             chat = await app.get_chat(SOURCE_CHANNEL_ID)
         else:
             chat = await app.get_chat(SOURCE_CHANNEL_USERNAME)
         
-        logger.info(f"✅ Accès au canal source: {chat.title}")
+        logger.info(f"✅ Accès canal source: {chat.title}")
         
-        # Vérifier si le bot peut voir les messages
-        # (doit être admin ou membre pour les canaux privés)
+        # Vérifier si le bot est dans le canal
         try:
-            messages = await app.get_chat_history(chat.id, limit=1)
-            async for _ in messages:
-                pass
-            logger.info("✅ Le bot peut lire les messages du canal")
+            member = await app.get_chat_member(chat.id, "me")
+            logger.info(f"👤 Statut bot dans canal: {member.status}")
+            
+            if member.status not in ["administrator", "member", "creator"]:
+                logger.warning("⚠️ Bot n'est pas membre/admin du canal")
+                logger.warning("Il ne pourra pas voir les messages en temps réel")
+                logger.warning("Le scanner périodique tentera d'accéder aux messages")
         except Exception as e:
-            logger.warning(f"⚠️ Le bot pourrait ne pas pouvoir lire les messages: {e}")
-            logger.warning("Assurez-vous que le bot est admin du canal privé")
-    
+            logger.warning(f"⚠️ Bot pas dans le canal: {e}")
+            
     except Exception as e:
-        logger.error(f"❌ Impossible d'accéder au canal source: {e}")
+        logger.error(f"❌ Erreur accès canal: {e}")
+        logger.warning("⚠️ Le scanner pourra échouer")
     
+    # Démarrer le scanner en tâche de fond
+    scanner_task = asyncio.create_task(periodic_scanner(app))
+    
+    # Maintenir le bot actif
     try:
-        # Garder le bot en fonctionnement
-        await asyncio.gather(
-            scanner_task,
-            app.run()
-        )
-    except KeyboardInterrupt:
-        logger.info("🛑 Arrêt du bot...")
+        # Afficher un message de démarrage
+        bot_info = await app.get_me()
+        logger.info(f"✅ Bot @{bot_info.username} prêt")
+        
+        # Boucle principale
+        while True:
+            try:
+                # Vérifier la connexion périodiquement
+                if not app.is_connected:
+                    logger.warning("⚠️ Déconnexion détectée, reconnexion...")
+                    await app.stop()
+                    await asyncio.sleep(10)
+                    app = await safe_start_client()
+                
+                await asyncio.sleep(60)  # Vérifier toutes les minutes
+                
+            except KeyboardInterrupt:
+                logger.info("🛑 Arrêt demandé...")
+                break
+            except Exception as e:
+                logger.error(f"❌ Erreur boucle principale: {e}")
+                await asyncio.sleep(30)
+                
     finally:
-        await app.stop()
+        # Nettoyage
+        logger.info("🧹 Nettoyage en cours...")
+        scanner_task.cancel()
+        try:
+            await scanner_task
+        except asyncio.CancelledError:
+            pass
+            
+        if app.is_connected:
+            await app.stop()
+            
         save_posted()
         logger.info("💾 Données sauvegardées")
+        logger.info("👋 Bot arrêté")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Créer l'application Pyrogram
+    app = Client(
+        name="forward_bot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        in_memory=True,
+        workers=50
+    )
+    
+    # Exécuter le bot
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Arrêt par utilisateur")
+    except Exception as e:
+        logger.error(f"❌ Erreur fatale: {e}")

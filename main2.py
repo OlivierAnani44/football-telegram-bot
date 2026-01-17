@@ -1,15 +1,16 @@
 import os
-import feedparser
 import json
-import asyncio
 import logging
+import random
+import asyncio
+import aiohttp
+import feedparser
 import re
+from datetime import datetime
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from bs4 import BeautifulSoup
-import random
-from datetime import datetime
-import aiohttp
+from html import escape  # Échappe les caractères spéciaux HTML
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -105,21 +106,33 @@ def analyze_content(title, summary):
 
 def generate_enriched_content(title, summary, source):
     main_cat = analyze_content(title, summary)
-    clean_summary = clean_text(summary)
+    clean_summary = clean_text(summary, max_len=400)
     clean_title = clean_text(title, max_len=80)
+    
+    # Choix des accroches et emojis
     accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
     emojis = [random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))]
+    
+    # Hashtags
     hashtags = ' '.join(random.sample(HASHTAGS_FR, min(5, len(HASHTAGS_FR))))
-    source_name = source or "Média"
-    message = (
-        f"{''.join(emojis)} {accroche}*{clean_title}*\n\n"
-        f"{clean_summary}\n\n"
-        f"📰 *Source :* {source_name}\n"
-        f"🕐 *Publié :* {datetime.now().strftime('%H:%M')}\n"
-        f"📊 *Catégorie :* {main_cat.upper()}\n\n"
-        f"{hashtags}"
+    
+    # Partie principale (résumé complet avec introduction)
+    main_part = (
+        f"<b><i>{escape(clean_title)}</i></b>\n\n"
+        f"<blockquote>{escape(clean_summary)}</blockquote>\n\n"
     )
-    return escape_markdown(message)
+
+    # Message final avec toutes les informations : titre, résumé, source, horaire, etc.
+    message = (
+        f"{''.join(emojis)} {accroche}\n\n"  # Emojis et accroche
+        f"{main_part}"  # Partie principale avec titre et résumé
+        f"📰 <b>Source :</b> <code>{escape(source or 'Média')}</code>\n"
+        f"🕐 <b>Publié :</b> <code>{datetime.now().strftime('%H:%M')}</code>\n"
+        f"📊 <b>Catégorie :</b> {main_cat.upper()}\n\n"
+        f"{hashtags}"  # Hashtags
+    )
+    
+    return message
 
 # ---------------- IMAGE EXTRACTION ----------------
 def extract_image(entry):
@@ -140,18 +153,17 @@ def extract_image(entry):
     return None
 
 # ---------------- POST NEWS ----------------
-async def post_to_channels(photo_url, message, button_url=None):
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔘 Lire l'article", url=button_url)]]) if button_url else None
+async def post_to_channels(photo_url, message):
     for channel in CHANNELS:
         try:
             if photo_url:
-                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+                await bot.send_photo(chat_id=channel, photo=photo_url, caption=message, parse_mode="HTML")
             else:
-                await bot.send_message(chat_id=channel, text=message, parse_mode="MarkdownV2", reply_markup=keyboard)
+                await bot.send_message(chat_id=channel, text=message, parse_mode="HTML")
             logger.info(f"✅ Publié sur {channel}")
         except TelegramError as e:
             logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(3,6))
+        await asyncio.sleep(random.randint(3, 6))
 
 # ---------------- RSS SCHEDULER ----------------
 async def rss_scheduler():
@@ -169,28 +181,4 @@ async def rss_scheduler():
                             title = entry.get('title', '')
                             summary = entry.get('summary', '') or entry.get('description', '')
                             
-                            # 📸 Extraction automatique de l'image
-                            img_url = extract_image(entry)
-                            
-                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-                            await post_to_channels(img_url, msg, button_url=link)
-                            posted_links.add(link)
-                            save_posted_links()
-                            await asyncio.sleep(random.randint(5,10))
-                except Exception as e:
-                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-            await asyncio.sleep(900)  # Toutes les 15 minutes
-
-# ---------------- MAIN ----------------
-async def main():
-    logger.info("🤖 Bot Films/Séries démarré")
-    await rss_scheduler()
-
-if __name__ == "__main__":
-    if not BOT_TOKEN or not CHANNELS:
-        logger.error("❌ BOT_TOKEN et CHANNELS requis")
-        exit(1)
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Arrêt propre")
+                            # 📸 Extraction automatique de l

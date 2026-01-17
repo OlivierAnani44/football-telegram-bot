@@ -120,7 +120,7 @@ def build_message(title, summary):
     return f"""
 {accroche}
 
-<u><b>{title}</b></u>
+<b>{title}</b>
 
 <blockquote>
 <i>{summary}</i>

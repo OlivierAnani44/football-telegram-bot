@@ -35,7 +35,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("MOVIE_SERIES_BOT")
+logger = logging.getLogger("ALLOCINE_BOT")
 
 bot = Bot(token=BOT_TOKEN)
 
@@ -111,16 +111,20 @@ def extract_image(entry):
     img = soup.find("img")
     return img["src"] if img else None
 
-async def download_entertainment_image():
+async def download_fallback_image():
     url = "https://source.unsplash.com/1200x675/?cinema,movie,series"
     filename = f"{IMAGE_DIR}/{uuid.uuid4().hex}.jpg"
 
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url, timeout=15) as r:
-            if r.status == 200:
-                with open(filename, "wb") as f:
-                    f.write(await r.read())
-                return filename
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=15) as r:
+                if r.status == 200:
+                    with open(filename, "wb") as f:
+                        f.write(await r.read())
+                    return filename
+    except:
+        pass
+
     return None
 
 # ================= MESSAGE =================
@@ -140,12 +144,35 @@ def build_message(title, summary):
 # ================= TELEGRAM =================
 async def post_with_comment(photo, message):
     for channel in CHANNELS:
-        if photo and photo.startswith("http"):
-            sent = await bot.send_photo(channel, photo, caption=message, parse_mode="MarkdownV2")
-        else:
-            with open(photo, "rb") as f:
-                sent = await bot.send_photo(channel, f, caption=message, parse_mode="MarkdownV2")
 
+        # Image URL
+        if isinstance(photo, str) and photo.startswith("http"):
+            sent = await bot.send_photo(
+                channel,
+                photo,
+                caption=message,
+                parse_mode="MarkdownV2"
+            )
+
+        # Image locale
+        elif isinstance(photo, str) and os.path.exists(photo):
+            with open(photo, "rb") as f:
+                sent = await bot.send_photo(
+                    channel,
+                    f,
+                    caption=message,
+                    parse_mode="MarkdownV2"
+                )
+
+        # Aucun visuel → texte
+        else:
+            sent = await bot.send_message(
+                channel,
+                message,
+                parse_mode="MarkdownV2"
+            )
+
+        # Commentaire attaché
         await bot.send_message(
             channel,
             random.choice(COMMENTS),
@@ -179,7 +206,7 @@ async def rss_loop():
                             temp = None
 
                             if not img:
-                                temp = await download_entertainment_image()
+                                temp = await download_fallback_image()
 
                             msg = build_message(title, summary)
                             await post_with_comment(img or temp, msg)
@@ -195,7 +222,7 @@ async def rss_loop():
             except Exception as e:
                 logger.error(f"❌ RSS error: {e}")
 
-            await asyncio.sleep(600)  # 10 min
+            await asyncio.sleep(600)
 
 # ================= MAIN =================
 async def main():

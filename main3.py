@@ -5,8 +5,10 @@ import logging
 from datetime import datetime, date
 from telegram import Bot
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -67,21 +69,25 @@ async def startup():
 # ================= SELENIUM =================
 def init_driver():
     options = Options()
-    options.add_argument("--headless")  # sans interface graphique
-    options.add_argument("--disable-gpu")
+    options.add_argument("--headless")  # mode sans GUI
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--lang=fr-FR")
-    driver = webdriver.Chrome(options=options)
+    options.add_argument("--window-size=1920,1080")
+
+    # webdriver-manager gère la version automatiquement
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     return driver
 
 def parse_matches(driver):
     driver.get(LEQUIPE_URL)
-    # laisse la page charger complètement
-    driver.implicitly_wait(5)
+    driver.implicitly_wait(5)  # laisse la page charger JS
 
     matches = []
 
-    # Chaque match est dans un bloc "DirectMatch" ou "match-block" selon l'HTML
+    # Chaque match est dans un bloc "match-block" ou "DirectMatch"
     match_blocks = driver.find_elements(By.CSS_SELECTOR, "div.match-block, div.DirectMatch")
     for block in match_blocks:
         try:

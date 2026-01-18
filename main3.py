@@ -1,28 +1,44 @@
 import os
 import asyncio
-import feedparser
+import aiohttp
 from datetime import datetime, timezone
 from telegram import Bot
 
-# ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")        # Ton token Telegram
-CHANNEL_ID = os.getenv("CHANNEL_ID")      # Ton canal Telegram, ex: @ton_canal
-RSS_URL = "https://www.livescore.com/rss/football"  # Flux RSS matchs du jour
-CHECK_INTERVAL = 3600                     # Vérifie toutes les heures
-MAX_MESSAGE_LENGTH = 4000                 # Limite Telegram
-POSTED_FILE = "posted_matches.txt"        # Pour éviter doublons
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+SCOREBAT_API = "https://www.scorebat.com/video-api/v3/"
+MAX_MESSAGE_LENGTH = 4000
 
-# ================= FONCTIONS =================
-def load_posted():
-    if not os.path.exists(POSTED_FILE):
-        return set()
-    with open(POSTED_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip() for line in f.readlines())
-
-def save_posted(posted):
-    with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        for match in posted:
-            f.write(match + "\n")
+async def fetch_matches():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(SCOREBAT_API) as resp:
+            data = await resp.json()
+            matches = []
+            today = datetime.now(timezone.utc).date()  # date UTC du jour
+            
+            for i, match in enumerate(data.get("response", [])):
+                if isinstance(match, dict):
+                    title = match.get("title", "Match inconnu")
+                    comp = match.get("competition", {})
+                    competition_name = comp.get("name", "Inconnue") if isinstance(comp, dict) else "Inconnue"
+                    date_str = match.get("date")
+                    
+                    # Filtrer uniquement les matchs d'aujourd'hui
+                    if date_str:
+                        try:
+                            match_date = datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+                        except ValueError:
+                            continue
+                        if match_date != today:
+                            continue  # ignorer les matchs d'autres jours
+                    else:
+                        continue
+                    
+                    matches.append(f"{title} - {competition_name} ({date_str})")
+                else:
+                    # Ignorer tout ce qui n'est pas un dict
+                    continue
+            return matches
 
 def split_message(text, max_length=MAX_MESSAGE_LENGTH):
     lines = text.split("\n")
@@ -38,48 +54,20 @@ def split_message(text, max_length=MAX_MESSAGE_LENGTH):
         messages.append(current_msg)
     return messages
 
-async def fetch_matches():
-    feed = feedparser.parse(RSS_URL)
-    today = datetime.now(timezone.utc).date()
-    matches = []
-
-    for entry in feed.entries:
-        title = entry.title
-        # Essayer de parser la date du flux RSS
-        if hasattr(entry, "published_parsed"):
-            match_date = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).date()
-        else:
-            continue
-
-        if match_date == today:
-            matches.append(f"{title} ({entry.published})")
-    return matches
-
-async def post_matches(bot):
-    posted = load_posted()
+async def main():
+    bot = Bot(token=BOT_TOKEN)
     matches = await fetch_matches()
-    new_matches = [m for m in matches if m not in posted]
-
-    if not new_matches:
-        print("Aucun nouveau match à poster pour aujourd'hui")
+    if not matches:
+        print("Aucun match trouvé pour aujourd'hui")
         return
 
     header = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"
-    full_text = header + "\n".join(new_matches)
+    full_text = header + "\n".join(matches)
     messages = split_message(full_text)
 
     for msg in messages:
         await bot.send_message(chat_id=CHANNEL_ID, text=msg)
-
-    print(f"{len(new_matches)} match(es) posté(s) sur Telegram !")
-    posted.update(new_matches)
-    save_posted(posted)
-
-async def main():
-    bot = Bot(token=BOT_TOKEN)
-    while True:
-        await post_matches(bot)
-        await asyncio.sleep(CHECK_INTERVAL)
+    print(f"{len(matches)} match(es) posté(s) sur Telegram !")
 
 if __name__ == "__main__":
     asyncio.run(main())

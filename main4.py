@@ -128,3 +128,105 @@ async def already_posted_on_channel(channel, title, link):
             if link and link in text:
                 return True
             if title and title[:40] in text:
+                return True
+    except Exception as e:
+        logger.warning(f"⚠️ Impossible de vérifier l’historique {channel}: {e}")
+    return False
+
+# ================= MESSAGE =================
+def build_message(title, summary):
+    accroche = random.choice(ACCROCHES)
+    hashtags = " ".join(random.sample(HASHTAGS, 3))
+
+    title = highlight_keywords(clean_text(title, 100))
+    summary = highlight_keywords(clean_text(summary))
+
+    return f"""
+{accroche}
+
+<b>{title}</b>
+
+<blockquote>
+<i>{summary}</i>
+</blockquote>
+
+📌 <b>Détails techniques</b> :
+<code>source=Cointelegraph | type=crypto_news</code>
+
+⏰ <i>{datetime.now().strftime('%H:%M')}</i>
+
+{hashtags}
+"""
+
+# ================= POST =================
+async def post(channel, photo, message):
+    if photo and photo.startswith("http"):
+        sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
+    elif photo:
+        with open(photo, "rb") as f:
+            sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
+    else:
+        sent = await bot.send_message(channel, message, parse_mode="HTML")
+
+    await bot.send_message(
+        channel,
+        random.choice(COMMENTS),
+        reply_to_message_id=sent.message_id,
+        parse_mode="HTML"
+    )
+
+# ================= LOOP =================
+async def rss_loop():
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(RSS_FEED, timeout=20) as r:
+                    feed = feedparser.parse(await r.text())
+
+                    for entry in feed.entries:
+                        uid = entry.get("id") or entry.get("link")
+                        link = entry.get("link")
+                        if not uid:
+                            continue
+
+                        title = entry.get("title", "")
+                        summary = entry.get("summary", "")
+                        img = extract_image(entry)
+                        temp = None
+                        if not img:
+                            temp = await download_crypto_image()
+
+                        msg = build_message(title, summary)
+
+                        for ch in CHANNELS:
+                            if uid in posted_links[ch]:
+                                continue
+
+                            if await already_posted_on_channel(ch, title, link):
+                                logger.info(f"⏭ Déjà présent sur {ch}")
+                                posted_links[ch].add(uid)
+                                continue
+
+                            await post(ch, img or temp, msg)
+                            posted_links[ch].add(uid)
+                            save_posted()
+                            logger.info(f"✅ Publié sur {ch}")
+                            await asyncio.sleep(2)
+
+                        if temp and os.path.exists(temp):
+                            os.remove(temp)
+
+                        await asyncio.sleep(MIN_DELAY)
+
+            except Exception as e:
+                logger.error(f"❌ Erreur RSS : {e}")
+
+            await asyncio.sleep(60)
+
+# ================= MAIN =================
+async def main():
+    logger.info("🤖 Bot Cointelegraph lancé")
+    await rss_loop()
+
+if __name__ == "__main__":
+    asyncio.run(main())

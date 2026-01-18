@@ -6,34 +6,38 @@ from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # @ton_canal
-RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"
-CHECK_INTERVAL = 3600  # 1 heure
-POSTED_FILE = "posted_matches.txt"
-MAX_MESSAGE_LENGTH = 3500  # Telegram max 4096, on laisse une marge
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # Exemple : @ton_canal
+RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"  # RSS football BBC FR
+CHECK_INTERVAL = 3600  # Vérifie toutes les heures
+POSTED_FILE = "posted_matches.txt"  # Pour ne pas reposter le même match
+MAX_MESSAGE_LENGTH = 4000  # Taille max du message Telegram
 
 # ================= FONCTIONS =================
 def load_posted():
+    """Charge les matchs déjà postés"""
     if not os.path.exists(POSTED_FILE):
         return set()
     with open(POSTED_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f.readlines())
 
 def save_posted(posted):
+    """Sauvegarde les matchs postés"""
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         for match in posted:
             f.write(match + "\n")
 
 async def fetch_matches():
+    """Récupère les matchs depuis le RSS"""
     feed = feedparser.parse(RSS_URL)
     matches = []
     for entry in feed.entries:
-        # On garde juste le titre pour réduire la taille
-        matches.append(entry.title.strip())
+        title = entry.title.strip()
+        published = entry.published if "published" in entry else ""
+        matches.append(f"{title} ({published})")
     return matches
 
-def split_messages(text, max_length):
-    """Découpe le texte en plusieurs messages si nécessaire"""
+def split_message(text, max_length=4000):
+    """Découpe un texte en plusieurs parties si trop long"""
     lines = text.split("\n")
     messages = []
     current_msg = ""
@@ -51,16 +55,16 @@ async def post_matches(bot):
     posted = load_posted()
     matches = await fetch_matches()
     new_matches = [m for m in matches if m not in posted]
-    
+
     if not new_matches:
         print("Aucun nouveau match à poster")
         return
-    
+
     header = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"
-    message_text = header + "\n".join(new_matches)
-    
-    messages = split_messages(message_text, MAX_MESSAGE_LENGTH)
-    
+    full_text = header + "\n".join(new_matches)
+
+    # Découpe le message si trop long
+    messages = split_message(full_text, MAX_MESSAGE_LENGTH)
     try:
         for msg in messages:
             await bot.send_message(chat_id=CHANNEL_ID, text=msg)
@@ -79,3 +83,4 @@ async def main():
 # ================= EXECUTION =================
 if __name__ == "__main__":
     asyncio.run(main())
+

@@ -1,164 +1,81 @@
 import os
 import asyncio
-import aiohttp
-import json
 import logging
-from datetime import date
-from telegram import Bot
+import httpx
+from datetime import datetime
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
-SPORTDB_API_KEY = os.getenv("SPORTDB_API_KEY", "1")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-API_BASE = f"https://www.thesportsdb.com/api/v1/json/{SPORTDB_API_KEY}"
+API_BASE = "https://www.thesportsdb.com/api/v1/json/3"
+TEST_DATE = "2024-06-15"  # DATE CONNUE AVEC DES MATCHS
+SPORT = "Soccer"
 
-FILES = {
-    "startup": "startup.json",
-    "today": "today.json",
-    "events": "events.json"
-}
-
-DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
-
-# ================= INIT =================
-bot = Bot(BOT_TOKEN)
+# ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FootballBot")
 
-# ================= UTILS =================
-def load(file, default):
-    if os.path.exists(file):
-        with open(file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-def save(file, data):
-    with open(file, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-
-events_posted = set(load(FILES["events"], []))
-
-# ================= SEND =================
-async def send(text):
-    for ch in CHANNELS:
-        await bot.send_photo(
-            chat_id=ch,
-            photo=DEFAULT_IMAGE,
-            caption=text,
-            parse_mode="Markdown"
-        )
-        await asyncio.sleep(2)
+# ================= TELEGRAM =================
+async def send_message(text: str):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
 
 # ================= API =================
-async def api_get(session, endpoint):
+async def api_get(endpoint: str, params: dict):
     url = f"{API_BASE}/{endpoint}"
-    async with session.get(url) as r:
-        if r.status == 404:
-            logger.info(f"Aucune donnée : {endpoint}")
-            return {}
-        if r.status != 200:
-            text = await r.text()
-            logger.error(f"API ERROR {r.status}: {text[:150]}")
-            return {}
-        return await r.json()
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+            logger.error(f"API ERROR {r.status_code}")
+            return None
+        try:
+            return r.json()
+        except Exception:
+            logger.error("Réponse non JSON")
+            return None
 
-# ================= STARTUP =================
-async def startup():
-    if not os.path.exists(FILES["startup"]):
-        await send(
-            "👋 *Bot Football ACTIVÉ*\n\n"
-            "⚽ Matchs du jour\n"
-            "🔴 Live scores\n"
-            "⏸ Mi-temps\n"
-            "🏁 Scores finaux\n\n"
-            "🔥 Bon match à tous !"
-        )
-        save(FILES["startup"], {"ok": True})
+# ================= LOGIC =================
+async def post_matches():
+    logger.info(f"Test avec la date : {TEST_DATE}")
 
-# ================= MATCHS DU JOUR =================
-async def post_today(session):
-    today = date.today().strftime("%Y-%m-%d")
-    state = load(FILES["today"], {})
-
-    if state.get("date") == today:
-        return
-
-    data = await api_get(session, f"eventsday.php?d={today}&s=Soccer")
-    events = data.get("events")
-
-    if not events:
-        return
-
-    lines = [
-        f"⚔️ {e['strHomeTeam']} vs {e['strAwayTeam']}"
-        for e in events[:20]
-    ]
-
-    await send(
-        f"📅 *MATCHS DU JOUR ({today})*\n\n" + "\n".join(lines)
+    data = await api_get(
+        "eventsday.php",
+        {"d": TEST_DATE, "s": SPORT}
     )
 
-    save(FILES["today"], {"date": today})
-
-# ================= LIVE / HT / FT =================
-async def live_events(session):
-    data = await api_get(session, "livescore.php?s=Soccer")
-    events = data.get("events")
-
-    if not events:
+    if not data or not data.get("events"):
+        logger.info("Aucun match trouvé")
+        await send_message("😴 Aucun match détecté pour le test.")
         return
 
-    live_lines = []
+    for event in data["events"][:5]:  # limite 5 pour test
+        home = event["strHomeTeam"]
+        away = event["strAwayTeam"]
+        time = event.get("strTime", "??:??")
+        league = event.get("strLeague", "Football")
 
-    for e in events:
-        event_id = e["idEvent"]
-        home = e["strHomeTeam"]
-        away = e["strAwayTeam"]
-        sh = e.get("intHomeScore", "-")
-        sa = e.get("intAwayScore", "-")
-        status = e.get("strStatus", "LIVE")
+        msg = (
+            f"⚽ <b>{league}</b>\n"
+            f"{home} 🆚 {away}\n"
+            f"🕒 {time}\n"
+            f"📅 {TEST_DATE}"
+        )
 
-        live_lines.append(f"🔴 {home} {sh}–{sa} {away}")
+        await send_message(msg)
+        await asyncio.sleep(2)
 
-        # MI-TEMPS
-        if status == "HT":
-            key = f"{event_id}-HT"
-            if key not in events_posted:
-                await send(
-                    f"⏸ *MI-TEMPS*\n\n"
-                    f"{home} {sh}–{sa} {away}"
-                )
-                events_posted.add(key)
-
-        # FIN DE MATCH
-        if status == "FT":
-            key = f"{event_id}-FT"
-            if key not in events_posted:
-                await send(
-                    f"🏁 *FIN DU MATCH*\n\n"
-                    f"{home} {sh}–{sa} {away}"
-                )
-                events_posted.add(key)
-
-    if live_lines:
-        await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(live_lines[:15]))
-
-    save(FILES["events"], list(events_posted))
-
-# ================= MAIN LOOP =================
+# ================= MAIN =================
 async def main():
-    await startup()
-
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                await post_today(session)
-                await live_events(session)
-            except Exception as e:
-                logger.error(e)
-
-            await asyncio.sleep(60)
+    await send_message("🚀 Bot football démarré (mode TEST)")
+    await post_matches()
 
 if __name__ == "__main__":
     asyncio.run(main())

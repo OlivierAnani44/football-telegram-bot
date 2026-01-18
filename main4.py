@@ -21,9 +21,8 @@ RSS_FEED = "https://fr.cointelegraph.com/rss"
 POSTED_FILE = "posted.json"
 IMAGE_DIR = "images"
 
-MIN_DELAY = 300  # 5 minutes
+MIN_DELAY = 300
 MAX_POSTED = 3000
-TELEGRAM_CHECK_LIMIT = 50  # messages à scanner par canal
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
@@ -60,12 +59,9 @@ POPULAR_KEYWORDS = [
 # ================= STORAGE =================
 def load_posted():
     if os.path.exists(POSTED_FILE):
-        try:
-            with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {ch: set(v) for ch, v in data.items()}
-        except:
-            pass
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return {k: set(v) for k, v in data.items()}
     return {ch: set() for ch in CHANNELS}
 
 def save_posted():
@@ -115,24 +111,6 @@ async def download_crypto_image():
                 return filename
     return None
 
-# ================= TELEGRAM CHECK =================
-async def already_posted_on_channel(channel, title, link):
-    try:
-        updates = await bot.get_chat_history(
-            chat_id=channel,
-            limit=TELEGRAM_CHECK_LIMIT
-        )
-        title = title.lower()
-        for msg in updates:
-            text = (msg.text or msg.caption or "").lower()
-            if link and link in text:
-                return True
-            if title and title[:40] in text:
-                return True
-    except Exception as e:
-        logger.warning(f"⚠️ Impossible de vérifier l’historique {channel}: {e}")
-    return False
-
 # ================= MESSAGE =================
 def build_message(title, summary):
     accroche = random.choice(ACCROCHES)
@@ -149,9 +127,6 @@ def build_message(title, summary):
 <blockquote>
 <i>{summary}</i>
 </blockquote>
-
-📌 <b>Détails techniques</b> :
-<code>source=Cointelegraph | type=crypto_news</code>
 
 ⏰ <i>{datetime.now().strftime('%H:%M')}</i>
 
@@ -185,36 +160,30 @@ async def rss_loop():
 
                     for entry in feed.entries:
                         uid = entry.get("id") or entry.get("link")
-                        link = entry.get("link")
                         if not uid:
                             continue
 
                         title = entry.get("title", "")
                         summary = entry.get("summary", "")
                         img = extract_image(entry)
-                        temp = None
-                        if not img:
-                            temp = await download_crypto_image()
-
-                        msg = build_message(title, summary)
 
                         for ch in CHANNELS:
                             if uid in posted_links[ch]:
                                 continue
 
-                            if await already_posted_on_channel(ch, title, link):
-                                logger.info(f"⏭ Déjà présent sur {ch}")
-                                posted_links[ch].add(uid)
-                                continue
+                            temp = None
+                            if not img:
+                                temp = await download_crypto_image()
 
-                            await post(ch, img or temp, msg)
+                            await post(ch, img or temp, build_message(title, summary))
                             posted_links[ch].add(uid)
                             save_posted()
                             logger.info(f"✅ Publié sur {ch}")
-                            await asyncio.sleep(2)
 
-                        if temp and os.path.exists(temp):
-                            os.remove(temp)
+                            if temp and os.path.exists(temp):
+                                os.remove(temp)
+
+                            await asyncio.sleep(2)
 
                         await asyncio.sleep(MIN_DELAY)
 

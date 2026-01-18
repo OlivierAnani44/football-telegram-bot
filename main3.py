@@ -3,7 +3,6 @@ import asyncio
 import aiohttp
 import json
 import logging
-import random
 from datetime import datetime
 from bs4 import BeautifulSoup
 from telegram import Bot
@@ -12,7 +11,7 @@ from telegram import Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-LIVE_URL = "https://m.flashscore.com/"
+LIVE_URL = "https://m.flashscore.com/live/"
 POSTED_FILE = "posted_live.json"
 STARTUP_FILE = "startup.json"
 
@@ -57,28 +56,15 @@ def mark_started():
 async def startup_message():
     msg = (
         "👋 *Salut tout le monde !*\n\n"
-        "⚽ Le bot football est maintenant *actif*.\n"
+        "⚽ Bot football *ACTIF*\n"
         "• Buts en direct\n"
-        "• Mi-temps & fin de match\n"
-        "• Pronostics live\n\n"
+        "• ⏸ Mi-temps (même 0-0)\n"
+        "• 🏁 Fin de match\n\n"
         "🔥 Restez connectés !"
     )
     for ch in CHANNELS:
         await bot.send_message(chat_id=ch, text=msg, parse_mode="Markdown")
         await asyncio.sleep(2)
-
-# ================= PRONOSTIC =================
-def pronostic(sh, sa):
-    if sh > sa:
-        res, cote = "1️⃣ Victoire Domicile", "1.45"
-    elif sa > sh:
-        res, cote = "2️⃣ Victoire Extérieur", "2.90"
-    else:
-        res, cote = "❌ Match Nul", "3.10"
-
-    btts = "✅ OUI" if sh > 0 and sa > 0 else "❌ NON"
-    over = "🔼 Over 2.5" if sh + sa >= 3 else "🔽 Under 2.5"
-    return res, cote, btts, over
 
 # ================= SCRAP LIVE =================
 async def scrape_matches(session):
@@ -91,21 +77,18 @@ async def scrape_matches(session):
             "Accept-Language": "fr-FR,fr;q=0.9"
         }
     ) as r:
-        soup = BeautifulSoup(await r.text(), "html.parser")
+        html = await r.text()
+        soup = BeautifulSoup(html, "html.parser")
 
-        for row in soup.select("div.event"):
+        for row in soup.select("div.event__match"):
             try:
                 home = row.select_one(".event__participant--home").text.strip()
                 away = row.select_one(".event__participant--away").text.strip()
 
-                scores = row.select(".event__score")
-                if len(scores) < 2:
-                    continue
+                sh = int(row.select_one(".event__score--home").text.strip())
+                sa = int(row.select_one(".event__score--away").text.strip())
 
-                sh = int(scores[0].text.strip())
-                sa = int(scores[1].text.strip())
-
-                minute = row.select_one(".event__time").text.strip()
+                minute = row.select_one(".event__stage").text.strip()
                 league = row.find_previous("div", class_="event__title").text.strip()
 
                 if not any(l.lower() in league.lower() for l in ALLOWED_LEAGUES):
@@ -119,7 +102,6 @@ async def scrape_matches(session):
                     "minute": minute,
                     "league": league
                 })
-
             except:
                 continue
 
@@ -128,26 +110,21 @@ async def scrape_matches(session):
 
 # ================= MESSAGE =================
 def build_message(m, event):
-    res, cote, btts, over = pronostic(m["sh"], m["sa"])
     return (
         f"⚽ *{event}*\n\n"
         f"🏆 *{m['league']}*\n\n"
         f"⚔️ *{m['home']}* {m['sh']} – {m['sa']} *{m['away']}*\n"
         f"⏱ {m['minute']}\n\n"
-        f"🧠 *Pronostics Live*\n"
-        f"{res} | 💰 {cote}\n"
-        f"BTTS : {btts}\n"
-        f"{over}\n\n"
         f"🕒 {datetime.now().strftime('%H:%M')}\n"
         f"#Football #Live"
     )
 
 # ================= POST =================
-async def post(photo, text):
+async def post(text):
     for ch in CHANNELS:
         await bot.send_photo(
             chat_id=ch,
-            photo=photo,
+            photo=DEFAULT_IMAGE,
             caption=text,
             parse_mode="Markdown"
         )
@@ -162,26 +139,27 @@ async def live_loop():
             for m in matches:
                 base = f"{m['home']}-{m['away']}"
 
-                # ⚽ BUT
-                goal_key = f"{base}-{m['sh']}-{m['sa']}"
-                if goal_key not in posted:
-                    await post(DEFAULT_IMAGE, build_message(m, "BUT ⚽"))
-                    posted.add(goal_key)
-                    save_set(POSTED_FILE, posted)
-
-                # ⏸ MI-TEMPS
-                if "HT" in m["minute"]:
+                # ⏸ MI-TEMPS (MÊME 0-0)
+                if m["minute"] in ["HT", "45+"]:
                     ht_key = f"{base}-HT"
                     if ht_key not in posted:
-                        await post(DEFAULT_IMAGE, build_message(m, "MI-TEMPS ⏸"))
+                        await post(build_message(m, "MI-TEMPS ⏸"))
                         posted.add(ht_key)
                         save_set(POSTED_FILE, posted)
 
+                # ⚽ BUT
+                goal_key = f"{base}-{m['sh']}-{m['sa']}"
+                if goal_key not in posted:
+                    if m["sh"] > 0 or m["sa"] > 0:
+                        await post(build_message(m, "BUT ⚽"))
+                        posted.add(goal_key)
+                        save_set(POSTED_FILE, posted)
+
                 # 🏁 FIN
-                if "FT" in m["minute"]:
+                if m["minute"] == "FT":
                     ft_key = f"{base}-FT"
                     if ft_key not in posted:
-                        await post(DEFAULT_IMAGE, build_message(m, "FIN DU MATCH 🏁"))
+                        await post(build_message(m, "FIN DU MATCH 🏁"))
                         posted.add(ft_key)
                         save_set(POSTED_FILE, posted)
 

@@ -11,7 +11,7 @@ import random
 from datetime import datetime
 from html import escape as html_escape
 import aiohttp
-from deep_translator import DeeplTranslator
+from deep_translator import GoogleTranslator  # Utilisation Google Translate
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -70,7 +70,6 @@ posted_links = load_posted_links()
 
 # ---------------- UTILITAIRES ----------------
 def clean_text(text, max_len=1000):
-    """Nettoie le texte pour Telegram et coupe s'il est trop long"""
     if not text:
         return ""
     text = re.sub(r'<[^>]+>', '', text)
@@ -87,7 +86,7 @@ def escape_html(text: str) -> str:
 # ---------------- TRADUCTION ----------------
 def translate_text(text: str) -> str:
     try:
-        return DeeplTranslator(source='en', target='fr').translate(text)
+        return GoogleTranslator(source='auto', target='fr').translate(text)
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
         return text
@@ -109,7 +108,7 @@ def generate_enriched_content(title, summary, source):
     full_text = f"{title}\n\n{summary}"
     translated_text = translate_text(full_text)
 
-    # On sépare traduit en titre et résumé pour Telegram
+    # Séparation titre / résumé
     lines = translated_text.split("\n", 1)
     title_fr = lines[0]
     summary_fr = lines[1] if len(lines) > 1 else ""

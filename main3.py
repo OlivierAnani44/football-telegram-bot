@@ -4,14 +4,13 @@ import aiohttp
 import json
 import logging
 from datetime import datetime, date
-from bs4 import BeautifulSoup
 from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-BASE_URL = "https://m.flashscore.com/"
+DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
 FILES = {
     "startup": "startup.json",
@@ -19,8 +18,6 @@ FILES = {
     "hour": "hour.json",
     "events": "events.json"
 }
-
-DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
 # ================= INIT =================
 bot = Bot(BOT_TOKEN)
@@ -40,7 +37,6 @@ def save(file, data):
 
 events_posted = set(load(FILES["events"], []))
 
-# ================= SEND =================
 async def send(text):
     for ch in CHANNELS:
         await bot.send_photo(
@@ -64,47 +60,33 @@ async def startup():
         )
         save(FILES["startup"], {"ok": True})
 
-# ================= SCRAPING =================
-async def fetch(session):
-    async with session.get(
-        BASE_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Android)",
-            "Accept-Language": "fr-FR,fr;q=0.9"
-        }
-    ) as r:
-        return BeautifulSoup(await r.text(), "html.parser")
+# ================= FLASHSCORE API =================
+# Endpoint général Flashscore JSON
+API_URL = "https://d.flashscore.com/x/feed/f_1_0_1_en_1"
 
-def parse_matches(soup):
+async def fetch_json(session, url=API_URL):
+    async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
+        return await r.json()
+
+def parse_matches_json(data):
     matches = []
-    for row in soup.select("div.event"):
-        try:
-            home = row.select_one(".event__participant--home").text.strip()
-            away = row.select_one(".event__participant--away").text.strip()
+    events = data.get("events", [])
+    for e in events:
+        home = e.get("home", {}).get("name")
+        away = e.get("away", {}).get("name")
+        sh = str(e.get("homeScore")) if e.get("homeScore") is not None else "-"
+        sa = str(e.get("awayScore")) if e.get("awayScore") is not None else "-"
+        minute = e.get("status") or "?"
+        league = e.get("tournament", {}).get("name") or "Football"
 
-            scores = row.select(".event__score span")
-            if len(scores) < 2:
-                sh, sa = "-", "-"
-            else:
-                sh, sa = scores[0].text.strip(), scores[1].text.strip()
-
-            stage = row.select_one(".event__stage")
-            minute = stage.text.strip() if stage else "?"
-
-            league = row.find_previous("div", class_="event__title")
-            league = league.text.strip() if league else "Football"
-
-            matches.append({
-                "home": home,
-                "away": away,
-                "sh": sh,
-                "sa": sa,
-                "minute": minute,
-                "league": league
-            })
-        except:
-            continue
-
+        matches.append({
+            "home": home,
+            "away": away,
+            "sh": sh,
+            "sa": sa,
+            "minute": minute,
+            "league": league
+        })
     return matches
 
 # ================= MATCHS DU JOUR =================
@@ -113,22 +95,17 @@ async def post_today(session):
     if state.get("date") == str(date.today()):
         return
 
-    soup = await fetch(session)
-    matches = parse_matches(soup)
+    data = await fetch_json(session)
+    matches = parse_matches_json(data)
 
     if not matches:
         return
 
-    lines = [
-        f"⚔️ {m['home']} vs {m['away']}"
-        for m in matches[:20]
-    ]
+    lines = [f"⚔️ {m['home']} vs {m['away']}" for m in matches[:20]]
 
     await send(
-        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
-        + "\n".join(lines)
+        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n" + "\n".join(lines)
     )
-
     save(FILES["today"], {"date": str(date.today())})
 
 # ================= LIVE HORAIRE =================
@@ -139,9 +116,8 @@ async def hourly_live(session):
     if state.get("hour") == hour:
         return
 
-    soup = await fetch(session)
-    matches = parse_matches(soup)
-    logger.info(f"⚽ Live détectés : {len(matches)}")
+    data = await fetch_json(session)
+    matches = parse_matches_json(data)
 
     if not matches:
         return
@@ -151,19 +127,16 @@ async def hourly_live(session):
         for m in matches[:15]
     ]
 
-    await send(
-        "🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines)
-    )
-
+    await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines))
     save(FILES["hour"], {"hour": hour})
 
 # ================= MI-TEMPS =================
 async def halftime_events(session):
-    soup = await fetch(session)
-    matches = parse_matches(soup)
+    data = await fetch_json(session)
+    matches = parse_matches_json(data)
 
     for m in matches:
-        if m["minute"] == "HT":
+        if m["minute"] in ["HT", "HT1H", "HT2H"]:
             key = f"{m['home']}-{m['away']}-HT"
             if key in events_posted:
                 continue
@@ -173,7 +146,6 @@ async def halftime_events(session):
                 f"{m['home']} {m['sh']}–{m['sa']} {m['away']}\n"
                 f"🏆 {m['league']}"
             )
-
             events_posted.add(key)
 
     save(FILES["events"], list(events_posted))
@@ -181,7 +153,6 @@ async def halftime_events(session):
 # ================= MAIN =================
 async def main():
     await startup()
-
     async with aiohttp.ClientSession() as session:
         while True:
             await post_today(session)

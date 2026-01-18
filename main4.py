@@ -23,6 +23,7 @@ IMAGE_DIR = "images"
 
 MIN_DELAY = 300  # 5 minutes
 MAX_POSTED = 3000
+TELEGRAM_CHECK_LIMIT = 50  # messages à scanner par canal
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
@@ -62,16 +63,18 @@ def load_posted():
         try:
             with open(POSTED_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # format: {"channel_id": ["link1", "link2", ...], ...}
-                return {ch: set(lst) for ch, lst in data.items()}
+                return {ch: set(v) for ch, v in data.items()}
         except:
             pass
     return {ch: set() for ch in CHANNELS}
 
 def save_posted():
-    data = {ch: list(posted_links[ch])[-MAX_POSTED:] for ch in posted_links}
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(
+            {ch: list(v)[-MAX_POSTED:] for ch, v in posted_links.items()},
+            f,
+            indent=2
+        )
 
 posted_links = load_posted()
 
@@ -112,104 +115,16 @@ async def download_crypto_image():
                 return filename
     return None
 
-# ================= MESSAGE =================
-def build_message(title, summary):
-    accroche = random.choice(ACCROCHES)
-    hashtags = " ".join(random.sample(HASHTAGS, 3))
-
-    title = highlight_keywords(clean_text(title, 100))
-    summary = highlight_keywords(clean_text(summary))
-
-    return f"""
-{accroche}
-
-<b>{title}</b>
-
-<blockquote>
-<i>{summary}</i>
-</blockquote>
-
-📌 <b>Détails techniques</b> :
-<code>source=Cointelegraph | type=crypto_news</code>
-
-⏰ <i>{datetime.now().strftime('%H:%M')}</i>
-
-{hashtags}
-"""
-
-# ================= TELEGRAM =================
-async def post(channel, photo, message):
+# ================= TELEGRAM CHECK =================
+async def already_posted_on_channel(channel, title, link):
     try:
-        if photo and photo.startswith("http"):
-            sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
-        elif photo:
-            with open(photo, "rb") as f:
-                sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
-        else:
-            sent = await bot.send_message(channel, message, parse_mode="HTML")
-
-        await bot.send_message(
-            channel,
-            random.choice(COMMENTS),
-            reply_to_message_id=sent.message_id,
-            parse_mode="HTML"
+        updates = await bot.get_chat_history(
+            chat_id=channel,
+            limit=TELEGRAM_CHECK_LIMIT
         )
-        return True
-    except Exception as e:
-        logger.error(f"❌ Erreur en postant sur {channel} : {e}")
-        return False
-
-# ================= LOOP =================
-async def rss_loop():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(RSS_FEED, timeout=20) as r:
-                    feed = feedparser.parse(await r.text())
-
-                    for entry in feed.entries:
-                        uid = entry.get("id") or entry.get("link")
-                        if not uid:
-                            continue
-
-                        title = entry.get("title", "")
-                        summary = entry.get("summary", "")
-                        img = extract_image(entry)
-                        temp = None
-                        if not img:
-                            temp = await download_crypto_image()
-
-                        msg = build_message(title, summary)
-
-                        posted_somewhere = False
-                        for ch in CHANNELS:
-                            if uid in posted_links.get(ch, set()):
-                                logger.info(f"⏭ Article déjà posté sur {ch}, passage au suivant")
-                                continue
-
-                            success = await post(ch, img or temp, msg)
-                            if success:
-                                posted_links[ch].add(uid)
-                                posted_somewhere = True
-                                await asyncio.sleep(2)
-
-                        if posted_somewhere:
-                            save_posted()
-                            if temp and os.path.exists(temp):
-                                os.remove(temp)
-                            logger.info("✅ Article publié sur au moins un canal")
-
-                        await asyncio.sleep(MIN_DELAY)
-
-            except Exception as e:
-                logger.error(f"❌ Erreur RSS : {e}")
-
-            await asyncio.sleep(60)
-
-# ================= MAIN =================
-async def main():
-    logger.info("🤖 Bot Cointelegraph lancé")
-    await rss_loop()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        title = title.lower()
+        for msg in updates:
+            text = (msg.text or msg.caption or "").lower()
+            if link and link in text:
+                return True
+            if title and title[:40] in text:

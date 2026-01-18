@@ -70,6 +70,7 @@ posted_links = load_posted_links()
 
 # ---------------- UTILITAIRES ----------------
 def clean_text(text, max_len=1000):
+    """Nettoie le texte pour Telegram et coupe s'il est trop long"""
     if not text:
         return ""
     text = re.sub(r'<[^>]+>', '', text)
@@ -104,9 +105,14 @@ def analyze_content(title, summary):
 
 # ---------------- GENERATION MESSAGE ----------------
 def generate_enriched_content(title, summary, source):
-    # Traduction complète
-    title_fr = translate_text(title)
-    summary_fr = translate_text(summary)
+    # Assemblage du texte complet et traduction avant résumé
+    full_text = f"{title}\n\n{summary}"
+    translated_text = translate_text(full_text)
+
+    # On sépare traduit en titre et résumé pour Telegram
+    lines = translated_text.split("\n", 1)
+    title_fr = lines[0]
+    summary_fr = lines[1] if len(lines) > 1 else ""
 
     main_cat = analyze_content(title_fr, summary_fr)
     clean_summary = escape_html(clean_text(summary_fr))

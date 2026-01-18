@@ -11,6 +11,7 @@ import random
 from datetime import datetime
 from html import escape as html_escape
 import aiohttp
+from deep_translator import DeeplTranslator  # Traduction de qualité
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,7 +23,6 @@ RSS_FEEDS = [
 ]
 
 POSTED_FILE = "posted.json"
-MAX_POSTED_LINKS = 2500
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ---------------- EMOJIS, ACCROCHES, HASHTAGS ----------------
 EMOJI_CATEGORIES = {
     'match': ['⚽', '🏆', '🔥', '🎯'],
     'transfert': ['🔄', '💰', '👤'],
@@ -46,7 +47,7 @@ HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
 
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- POSTÉ PAR CANAL ----------------
+# ---------------- GESTION DES LIENS DÉJÀ POSTÉS ----------------
 def load_posted_links():
     try:
         if os.path.exists(POSTED_FILE):
@@ -82,9 +83,17 @@ def clean_text(text, max_len=500):
 def escape_html(text: str) -> str:
     return html_escape(text)
 
+# Traduction Deepl automatique
+def translate_text(text: str) -> str:
+    try:
+        return DeeplTranslator(source='en', target='fr').translate(text)
+    except Exception as e:
+        logger.error(f"❌ Erreur traduction : {e}")
+        return text
+
 def analyze_content(title, summary):
     text = f"{title} {summary}".lower()
-    if any(word in text for word in ["match", "score", "résultat", "victoire", "défaite"]):
+    if any(word in text for word in ["match", "score", "victoire", "défaite"]):
         return 'match'
     if any(word in text for word in ["transfert", "signature", "contrat"]):
         return 'transfert'
@@ -93,9 +102,13 @@ def analyze_content(title, summary):
     return 'general'
 
 def generate_enriched_content(title, summary, source):
-    main_cat = analyze_content(title, summary)
-    clean_summary = escape_html(clean_text(summary))
-    clean_title = escape_html(clean_text(title, max_len=80))
+    # Traduction en français
+    title_fr = translate_text(title)
+    summary_fr = translate_text(summary)
+
+    main_cat = analyze_content(title_fr, summary_fr)
+    clean_summary = escape_html(clean_text(summary_fr))
+    clean_title = escape_html(clean_text(title_fr, max_len=80))
     accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
     emoji = random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))
     hashtags = ' '.join(HASHTAGS_FR)
@@ -128,7 +141,7 @@ def extract_image(entry):
         return img_tag['src']
     return None
 
-# ---------------- POST NEWS ----------------
+# ---------------- POST SUR TELEGRAM ----------------
 async def post_to_channels(photo_url, message, button_url=None):
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔘 Lire l'article", url=button_url)]]
@@ -161,7 +174,7 @@ async def post_to_channels(photo_url, message, button_url=None):
             logger.error(f"❌ Telegram error {channel}: {e}")
         await asyncio.sleep(random.randint(3, 6))
 
-# ---------------- RSS SCHEDULER ----------------
+# ---------------- SCHEDULER ----------------
 async def rss_scheduler():
     intervals = [600, 660, 420]  # 10min, 11min, 7min
     idx = 0
@@ -198,7 +211,7 @@ async def rss_scheduler():
 
 # ---------------- MAIN ----------------
 async def main():
-    logger.info("🤖 Bot BBC Football démarré")
+    logger.info("🤖 Bot BBC Football FR démarré")
     await rss_scheduler()
 
 if __name__ == "__main__":

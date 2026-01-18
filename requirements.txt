@@ -12,3 +12,5 @@ pysocks==1.7.1
 twilio==9.0.0
 selenium==4.11.2
 webdriver-manager==3.8.5
+playwright==1.43.0
+

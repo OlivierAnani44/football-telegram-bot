@@ -4,11 +4,8 @@ import json
 import logging
 from datetime import datetime, date
 from telegram import Bot
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -66,43 +63,26 @@ async def startup():
         )
         save(FILES["startup"], {"ok": True})
 
-# ================= SELENIUM =================
-def init_driver():
-    options = Options()
-    options.add_argument("--headless")  # mode sans GUI
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--lang=fr-FR")
-    options.add_argument("--window-size=1920,1080")
-
-    # webdriver-manager gère la version automatiquement
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
-
-def parse_matches(driver):
-    driver.get(LEQUIPE_URL)
-    driver.implicitly_wait(5)  # laisse la page charger JS
+# ================= FETCH MATCHES =================
+async def fetch_matches(page):
+    await page.goto(LEQUIPE_URL)
+    await page.wait_for_timeout(5000)  # 5 secondes pour charger JS
+    html = await page.content()
+    soup = BeautifulSoup(html, "html.parser")
 
     matches = []
 
-    # Chaque match est dans un bloc "match-block" ou "DirectMatch"
-    match_blocks = driver.find_elements(By.CSS_SELECTOR, "div.match-block, div.DirectMatch")
-    for block in match_blocks:
+    for block in soup.select("div.match-block, div.DirectMatch"):
         try:
-            home = block.find_element(By.CSS_SELECTOR, ".teamHome, .team.home").text.strip()
-            away = block.find_element(By.CSS_SELECTOR, ".teamAway, .team.away").text.strip()
-            score_el = block.find_element(By.CSS_SELECTOR, ".score")
-            score_text = score_el.text.strip() if score_el else "-"
+            home = block.select_one(".teamHome, .team.home").get_text(strip=True)
+            away = block.select_one(".teamAway, .team.away").get_text(strip=True)
+            score_text = block.select_one(".score").get_text(strip=True) if block.select_one(".score") else "-"
             if "-" in score_text:
                 sh, sa = [s.strip() for s in score_text.split("-")]
             else:
                 sh, sa = "-", "-"
-            minute_el = block.find_element(By.CSS_SELECTOR, ".minute")
-            minute = minute_el.text.strip() if minute_el else "?"
-            league_el = block.find_element(By.CSS_SELECTOR, ".competition")
-            league = league_el.text.strip() if league_el else "Football"
+            minute = block.select_one(".minute").get_text(strip=True) if block.select_one(".minute") else "?"
+            league = block.select_one(".competition").get_text(strip=True) if block.select_one(".competition") else "Football"
 
             matches.append({
                 "home": home,
@@ -118,12 +98,12 @@ def parse_matches(driver):
     return matches
 
 # ================= MATCHS DU JOUR =================
-async def post_today(driver):
+async def post_today(page):
     state = load(FILES["today"], {})
     if state.get("date") == str(date.today()):
         return
 
-    matches = parse_matches(driver)
+    matches = await fetch_matches(page)
     if not matches:
         return
 
@@ -132,13 +112,13 @@ async def post_today(driver):
     save(FILES["today"], {"date": str(date.today())})
 
 # ================= LIVE HORAIRE =================
-async def hourly_live(driver):
+async def hourly_live(page):
     hour = datetime.now().strftime("%Y-%m-%d-%H")
     state = load(FILES["hour"], {})
     if state.get("hour") == hour:
         return
 
-    matches = parse_matches(driver)
+    matches = await fetch_matches(page)
     logger.info(f"⚽ Live détectés : {len(matches)}")
     if not matches:
         return
@@ -148,8 +128,8 @@ async def hourly_live(driver):
     save(FILES["hour"], {"hour": hour})
 
 # ================= MI‑TEMPS =================
-async def halftime_events(driver):
-    matches = parse_matches(driver)
+async def halftime_events(page):
+    matches = await fetch_matches(page)
     for m in matches:
         if m["minute"].lower() in ["mi‑temps", "ht"]:
             key = f"{m['home']}-{m['away']}-HT"
@@ -162,15 +142,15 @@ async def halftime_events(driver):
 # ================= MAIN =================
 async def main():
     await startup()
-    driver = init_driver()
-    try:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
         while True:
-            await post_today(driver)
-            await hourly_live(driver)
-            await halftime_events(driver)
+            await post_today(page)
+            await hourly_live(page)
+            await halftime_events(page)
             await asyncio.sleep(60)
-    finally:
-        driver.quit()
+        await browser.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

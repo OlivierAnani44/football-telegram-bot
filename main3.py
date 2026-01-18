@@ -73,6 +73,10 @@ async def process_matches():
 
     new_posts = 0
     for match in matches:
+        # ✅ Vérifie que match est bien un dictionnaire
+        if not isinstance(match, dict):
+            continue
+
         match_id = match.get("title")
         if not match_id or match_id in posted:
             continue

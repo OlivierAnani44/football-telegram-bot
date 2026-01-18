@@ -59,24 +59,18 @@ async def send_message(text):
         logger.error(f"Error sending Telegram message: {e}")
 
 # ================= SCOREBAT =================
-async def fetch_matches():
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(SCOREBAT_API)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("response", [])
-
-# ================= MAIN LOGIC =================
 async def process_matches():
     posted = load_posted()
     matches = await fetch_matches()
 
-    new_posts = 0
-    for match in matches:
-        # Vérifie que match est bien un dict
-        if not isinstance(match, dict):
-            continue
+    # Filtrer uniquement les dicts
+    valid_matches = [m for m in matches if isinstance(m, dict)]
+    invalid_count = len(matches) - len(valid_matches)
+    if invalid_count > 0:
+        logger.warning(f"Ignored {invalid_count} invalid matches (not dict)")
 
+    new_posts = 0
+    for match in valid_matches:
         match_id = match.get("title")
         if not match_id or match_id in posted:
             continue
@@ -114,6 +108,7 @@ async def process_matches():
         logger.info(f"Posted {new_posts} new matches")
     else:
         logger.info("No new matches to post")
+
 
 # ================= LOOP =================
 async def main():

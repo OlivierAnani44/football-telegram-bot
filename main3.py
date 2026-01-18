@@ -1,50 +1,57 @@
 import os
 import asyncio
-import aiohttp
+import feedparser
 from datetime import datetime
-from bs4 import BeautifulSoup
 from telegram import Bot
 
-# ================= CONFIGURATION =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Ton token Telegram
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # Ton canal Telegram @nom_du_canal ou ID
-FOOTBALL_URL = "https://www.livescore.com/fr/football/"  # Exemple pour récupérer matchs
-CHECK_INTERVAL = 3600  # Vérifie toutes les heures (3600 sec)
+# ================= CONFIG =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # Exemple : @ton_canal
+RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"  # RSS football BBC FR
+CHECK_INTERVAL = 3600  # 1 heure
+POSTED_FILE = "posted_matches.txt"  # Pour ne pas reposter le même match
 
 # ================= FONCTIONS =================
+def load_posted():
+    """Charge les matchs déjà postés"""
+    if not os.path.exists(POSTED_FILE):
+        return set()
+    with open(POSTED_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f.readlines())
+
+def save_posted(posted):
+    """Sauvegarde les matchs postés"""
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        for match in posted:
+            f.write(match + "\n")
+
 async def fetch_matches():
-    """Récupère les matchs du jour depuis le site"""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(FOOTBALL_URL) as resp:
-            if resp.status != 200:
-                print("Erreur lors de la récupération des matchs")
-                return []
-            html = await resp.text()
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            matches = []
-            # Exemple de parsing : tu devras adapter selon la structure du site
-            for match in soup.find_all('div', class_='match-row'):
-                teams = match.find_all('span', class_='team-name')
-                score = match.find('span', class_='score')
-                if teams:
-                    home = teams[0].text.strip()
-                    away = teams[1].text.strip() if len(teams) > 1 else ""
-                    result = score.text.strip() if score else "vs"
-                    matches.append(f"{home} {result} {away}")
-            return matches
+    """Récupère les matchs depuis le RSS"""
+    feed = feedparser.parse(RSS_URL)
+    matches = []
+    for entry in feed.entries:
+        title = entry.title.strip()
+        published = entry.published if "published" in entry else ""
+        matches.append(f"{title} ({published})")
+    return matches
 
 async def post_matches(bot):
+    posted = load_posted()
     matches = await fetch_matches()
-    if not matches:
-        print("Aucun match trouvé pour aujourd'hui")
+    new_matches = [m for m in matches if m not in posted]
+    
+    if not new_matches:
+        print("Aucun nouveau match à poster")
         return
+    
     message = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"
-    message += "\n".join(matches)
+    message += "\n".join(new_matches)
     
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=message)
-        print("Message posté avec succès !")
+        print(f"{len(new_matches)} match(es) posté(s) sur Telegram !")
+        posted.update(new_matches)
+        save_posted(posted)
     except Exception as e:
         print(f"Erreur lors de l'envoi sur Telegram: {e}")
 

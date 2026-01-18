@@ -11,13 +11,14 @@ from telegram import Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-LIVE_URL = "https://m.flashscore.com/live/"
-TODAY_URL = "https://m.flashscore.com/"
+BASE_URL = "https://m.flashscore.com/"
 
-POSTED_FILE = "posted.json"
-STARTUP_FILE = "startup.json"
-HOURLY_FILE = "hourly.json"
-TODAY_FILE = "today.json"
+FILES = {
+    "startup": "startup.json",
+    "today": "today.json",
+    "hour": "hour.json",
+    "events": "events.json"
+}
 
 DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
@@ -37,7 +38,7 @@ def save(file, data):
     with open(file, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
-posted = set(load(POSTED_FILE, []))
+events_posted = set(load(FILES["events"], []))
 
 # ================= SEND =================
 async def send(text):
@@ -52,131 +53,132 @@ async def send(text):
 
 # ================= STARTUP =================
 async def startup():
-    if not os.path.exists(STARTUP_FILE):
+    if not os.path.exists(FILES["startup"]):
         await send(
             "👋 *Salut tout le monde !*\n\n"
-            "⚽ Bot football *ACTIF*\n"
+            "⚽ Bot Football *ACTIF*\n"
             "• Matchs du jour\n"
-            "• Lives toutes les 1h\n"
-            "• Buts & mi-temps\n\n"
-            "🔥 Restez connectés"
+            "• Live toutes les 1h\n"
+            "• Mi-temps & scores\n\n"
+            "🔥 Bon match à tous"
         )
-        save(STARTUP_FILE, {"started": True})
+        save(FILES["startup"], {"ok": True})
 
-# ================= SCRAPE MATCHS DU JOUR =================
-async def scrape_today(session):
-    matches = []
+# ================= SCRAPING =================
+async def fetch(session):
     async with session.get(
-        TODAY_URL,
-        headers={"User-Agent": "Mozilla/5.0 (Android)"}
+        BASE_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Android)",
+            "Accept-Language": "fr-FR,fr;q=0.9"
+        }
     ) as r:
-        soup = BeautifulSoup(await r.text(), "html.parser")
+        return BeautifulSoup(await r.text(), "html.parser")
 
-        for row in soup.select("div.event__match"):
-            try:
-                home = row.select_one(".event__participant--home").text.strip()
-                away = row.select_one(".event__participant--away").text.strip()
-                time = row.select_one(".event__time").text.strip()
-                league = row.find_previous("div", class_="event__title").text.strip()
+def parse_matches(soup):
+    matches = []
+    for row in soup.select("div.event"):
+        try:
+            home = row.select_one(".event__participant--home").text.strip()
+            away = row.select_one(".event__participant--away").text.strip()
 
-                matches.append(f"🕒 {time} — *{home} vs {away}*")
+            scores = row.select(".event__score span")
+            if len(scores) < 2:
+                sh, sa = "-", "-"
+            else:
+                sh, sa = scores[0].text.strip(), scores[1].text.strip()
 
-            except:
-                continue
+            stage = row.select_one(".event__stage")
+            minute = stage.text.strip() if stage else "?"
+
+            league = row.find_previous("div", class_="event__title")
+            league = league.text.strip() if league else "Football"
+
+            matches.append({
+                "home": home,
+                "away": away,
+                "sh": sh,
+                "sa": sa,
+                "minute": minute,
+                "league": league
+            })
+        except:
+            continue
+
     return matches
 
-# ================= SCRAPE LIVE =================
-async def scrape_live(session):
-    matches = []
-    async with session.get(
-        LIVE_URL,
-        headers={"User-Agent": "Mozilla/5.0 (Android)"}
-    ) as r:
-        soup = BeautifulSoup(await r.text(), "html.parser")
-
-        for row in soup.select("div.event__match"):
-            try:
-                home = row.select_one(".event__participant--home").text.strip()
-                away = row.select_one(".event__participant--away").text.strip()
-                sh = row.select_one(".event__score--home").text.strip()
-                sa = row.select_one(".event__score--away").text.strip()
-                minute = row.select_one(".event__stage").text.strip()
-
-                matches.append({
-                    "home": home,
-                    "away": away,
-                    "sh": sh,
-                    "sa": sa,
-                    "minute": minute
-                })
-            except:
-                continue
-    logger.info(f"⚽ Live détectés : {len(matches)}")
-    return matches
-
-# ================= MATCHS DU JOUR (1 FOIS / JOUR) =================
+# ================= MATCHS DU JOUR =================
 async def post_today(session):
-    today_state = load(TODAY_FILE, {})
-    if today_state.get("date") == str(date.today()):
+    state = load(FILES["today"], {})
+    if state.get("date") == str(date.today()):
         return
 
-    matches = await scrape_today(session)
-    if not matches:
-        return
+    soup = await fetch(session)
+    matches = parse_matches(soup)
 
-    text = (
-        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
-        + "\n".join(matches[:20])
-        + "\n\n#Football"
-    )
-
-    await send(text)
-    save(TODAY_FILE, {"date": str(date.today())})
-
-# ================= LIVE TOUTES LES 1 HEURE =================
-async def hourly_live(session):
-    hour = datetime.now().strftime("%Y-%m-%d-%H")
-    hourly_state = load(HOURLY_FILE, {})
-
-    if hourly_state.get("hour") == hour:
-        return
-
-    matches = await scrape_live(session)
     if not matches:
         return
 
     lines = [
-        f"⚔️ {m['home']} {m['sh']}–{m['sa']} {m['away']} ({m['minute']})"
-        for m in matches
+        f"⚔️ {m['home']} vs {m['away']}"
+        for m in matches[:20]
     ]
 
-    text = (
-        "🔴 *MATCHS EN LIVE*\n\n"
-        + "\n".join(lines[:15])
-        + "\n\n⏱ Mise à jour horaire"
+    await send(
+        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
+        + "\n".join(lines)
     )
 
-    await send(text)
-    save(HOURLY_FILE, {"hour": hour})
+    save(FILES["today"], {"date": str(date.today())})
 
-# ================= EVENTS LIVE =================
-async def live_events(session):
-    matches = await scrape_live(session)
+# ================= LIVE HORAIRE =================
+async def hourly_live(session):
+    hour = datetime.now().strftime("%Y-%m-%d-%H")
+    state = load(FILES["hour"], {})
+
+    if state.get("hour") == hour:
+        return
+
+    soup = await fetch(session)
+    matches = parse_matches(soup)
+    logger.info(f"⚽ Live détectés : {len(matches)}")
+
+    if not matches:
+        return
+
+    lines = [
+        f"🔴 {m['home']} {m['sh']}–{m['sa']} {m['away']} ({m['minute']})"
+        for m in matches[:15]
+    ]
+
+    await send(
+        "🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines)
+    )
+
+    save(FILES["hour"], {"hour": hour})
+
+# ================= MI-TEMPS =================
+async def halftime_events(session):
+    soup = await fetch(session)
+    matches = parse_matches(soup)
 
     for m in matches:
-        key = f"{m['home']}-{m['away']}-{m['sh']}-{m['sa']}-{m['minute']}"
+        if m["minute"] == "HT":
+            key = f"{m['home']}-{m['away']}-HT"
+            if key in events_posted:
+                continue
 
-        # MI-TEMPS
-        if m["minute"] == "HT" and key not in posted:
             await send(
                 f"⏸ *MI-TEMPS*\n\n"
-                f"{m['home']} {m['sh']}–{m['sa']} {m['away']}"
+                f"{m['home']} {m['sh']}–{m['sa']} {m['away']}\n"
+                f"🏆 {m['league']}"
             )
-            posted.add(key)
 
-    save(POSTED_FILE, list(posted))
+            events_posted.add(key)
 
-# ================= MAIN LOOP =================
+    save(FILES["events"], list(events_posted))
+
+# ================= MAIN =================
 async def main():
     await startup()
 
@@ -184,7 +186,7 @@ async def main():
         while True:
             await post_today(session)
             await hourly_live(session)
-            await live_events(session)
+            await halftime_events(session)
             await asyncio.sleep(60)
 
 if __name__ == "__main__":

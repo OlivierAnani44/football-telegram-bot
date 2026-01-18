@@ -54,15 +54,20 @@ async def send(text):
 async def api_get(session, endpoint):
     url = f"{API_BASE}/{endpoint}"
     async with session.get(url) as r:
+        if r.status == 404:
+            logger.info(f"Aucune donnée : {endpoint}")
+            return {}
         if r.status != 200:
-            raise Exception(f"API ERROR {r.status}")
+            text = await r.text()
+            logger.error(f"API ERROR {r.status}: {text[:150]}")
+            return {}
         return await r.json()
 
 # ================= STARTUP =================
 async def startup():
     if not os.path.exists(FILES["startup"]):
         await send(
-            "👋 *Bot Football ACTIF*\n\n"
+            "👋 *Bot Football ACTIVÉ*\n\n"
             "⚽ Matchs du jour\n"
             "🔴 Live scores\n"
             "⏸ Mi-temps\n"
@@ -85,9 +90,10 @@ async def post_today(session):
     if not events:
         return
 
-    lines = []
-    for e in events[:20]:
-        lines.append(f"⚔️ {e['strHomeTeam']} vs {e['strAwayTeam']}")
+    lines = [
+        f"⚔️ {e['strHomeTeam']} vs {e['strAwayTeam']}"
+        for e in events[:20]
+    ]
 
     await send(
         f"📅 *MATCHS DU JOUR ({today})*\n\n" + "\n".join(lines)
@@ -95,7 +101,7 @@ async def post_today(session):
 
     save(FILES["today"], {"date": today})
 
-# ================= LIVE + EVENTS =================
+# ================= LIVE / HT / FT =================
 async def live_events(session):
     data = await api_get(session, "livescore.php?s=Soccer")
     events = data.get("events")
@@ -109,11 +115,10 @@ async def live_events(session):
         event_id = e["idEvent"]
         home = e["strHomeTeam"]
         away = e["strAwayTeam"]
-        sh = e["intHomeScore"]
-        sa = e["intAwayScore"]
+        sh = e.get("intHomeScore", "-")
+        sa = e.get("intAwayScore", "-")
         status = e.get("strStatus", "LIVE")
 
-        # LIVE MESSAGE
         live_lines.append(f"🔴 {home} {sh}–{sa} {away}")
 
         # MI-TEMPS

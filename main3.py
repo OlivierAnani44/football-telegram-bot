@@ -59,18 +59,43 @@ async def send_message(text):
         logger.error(f"Error sending Telegram message: {e}")
 
 # ================= SCOREBAT =================
+async def fetch_matches():
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(SCOREBAT_API)
+        r.raise_for_status()
+        data = r.json()
+
+        # 🔍 Log pour debug la structure réelle de la réponse
+        logger.info(f"Raw API response type: {type(data)}")
+        if isinstance(data, dict):
+            logger.info(f"Keys in response: {list(data.keys())}")
+        else:
+            logger.warning(f"Unexpected API response type: {type(data)}. Returning empty list.")
+            return []
+
+        response = data.get("response")
+        if not isinstance(response, list):
+            logger.warning(f"API 'response' is not a list. Returning empty list.")
+            return []
+
+        return response
+
+# ================= MAIN LOGIC =================
 async def process_matches():
     posted = load_posted()
     matches = await fetch_matches()
 
-    # Filtrer uniquement les dicts
-    valid_matches = [m for m in matches if isinstance(m, dict)]
-    invalid_count = len(matches) - len(valid_matches)
-    if invalid_count > 0:
-        logger.warning(f"Ignored {invalid_count} invalid matches (not dict)")
+    if not isinstance(matches, list):
+        logger.error(f"Expected list of matches, got {type(matches)}. Skipping this batch.")
+        return
 
     new_posts = 0
-    for match in valid_matches:
+    for match in matches:
+        # ✅ Sécurité : ignorer tout ce qui n'est pas un dict
+        if not isinstance(match, dict):
+            logger.warning(f"Ignored invalid match: {match}")
+            continue
+
         match_id = match.get("title")
         if not match_id or match_id in posted:
             continue
@@ -108,7 +133,6 @@ async def process_matches():
         logger.info(f"Posted {new_posts} new matches")
     else:
         logger.info("No new matches to post")
-
 
 # ================= LOOP =================
 async def main():

@@ -19,14 +19,20 @@ logger = logging.getLogger("FootballBot")
 # ================= TELEGRAM =================
 async def send_message(text: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
     payload = {
         "chat_id": CHANNEL_ID,
-        "text": text,
-        "parse_mode": "HTML"
+        "text": text
+        # ❌ PAS de parse_mode
     }
+
     async with httpx.AsyncClient() as client:
         r = await client.post(url, json=payload)
-        r.raise_for_status()
+
+        if r.status_code != 200:
+            logger.error(f"Telegram ERROR {r.status_code}: {r.text}")
+        else:
+            logger.info("Message envoyé")
 
 # ================= API =================
 async def api_get(endpoint: str, params: dict):

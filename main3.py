@@ -73,7 +73,7 @@ async def process_matches():
 
     new_posts = 0
     for match in matches:
-        # ✅ Vérifie que match est bien un dictionnaire
+        # Vérifie que match est bien un dict
         if not isinstance(match, dict):
             continue
 

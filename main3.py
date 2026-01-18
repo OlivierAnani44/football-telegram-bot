@@ -4,13 +4,15 @@ import aiohttp
 import json
 import logging
 from datetime import datetime, date
+from bs4 import BeautifulSoup
 from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
+# URL pour les directs football de L’Équipe
+BASE_URL = "https://www.lequipe.fr/Football/Directs"
 
 FILES = {
     "startup": "startup.json",
@@ -18,6 +20,8 @@ FILES = {
     "hour": "hour.json",
     "events": "events.json"
 }
+
+DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
 # ================= INIT =================
 bot = Bot(BOT_TOKEN)
@@ -37,6 +41,7 @@ def save(file, data):
 
 events_posted = set(load(FILES["events"], []))
 
+# ================= SEND =================
 async def send(text):
     for ch in CHANNELS:
         await bot.send_photo(
@@ -45,7 +50,7 @@ async def send(text):
             caption=text,
             parse_mode="Markdown"
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 # ================= STARTUP =================
 async def startup():
@@ -53,40 +58,60 @@ async def startup():
         await send(
             "👋 *Salut tout le monde !*\n\n"
             "⚽ Bot Football *ACTIF*\n"
-            "• Matchs du jour\n"
+            "• Matchs du jour (L’Équipe)\n"
             "• Live toutes les 1h\n"
-            "• Mi-temps & scores\n\n"
+            "• Mi‑temps & scores\n\n"
             "🔥 Bon match à tous"
         )
         save(FILES["startup"], {"ok": True})
 
-# ================= FLASHSCORE API =================
-# Endpoint général Flashscore JSON
-API_URL = "https://d.flashscore.com/x/feed/f_1_0_1_en_1"
+# ================= SCRAPING =================
+async def fetch(session):
+    async with session.get(
+        BASE_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept-Language": "fr-FR,fr;q=0.9"
+        }
+    ) as r:
+        text = await r.text()
+        # Supprime le bloc de cookies si nécessaire
+        return BeautifulSoup(text, "html.parser")
 
-async def fetch_json(session, url=API_URL):
-    async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as r:
-        return await r.json()
-
-def parse_matches_json(data):
+def parse_lequipe_matches(soup):
     matches = []
-    events = data.get("events", [])
-    for e in events:
-        home = e.get("home", {}).get("name")
-        away = e.get("away", {}).get("name")
-        sh = str(e.get("homeScore")) if e.get("homeScore") is not None else "-"
-        sa = str(e.get("awayScore")) if e.get("awayScore") is not None else "-"
-        minute = e.get("status") or "?"
-        league = e.get("tournament", {}).get("name") or "Football"
 
-        matches.append({
-            "home": home,
-            "away": away,
-            "sh": sh,
-            "sa": sa,
-            "minute": minute,
-            "league": league
-        })
+    # Exemple : les scores sont dans des <div class="score ..."> …
+    # On suppose que chaque rencontre a des classes .directMatch ou .matchBlock
+    # Tu peux adapter selon le HTML réel (inspecte avec DevTools)
+    for block in soup.select("div.directMatch, div.matchBlock"):
+        try:
+            home = block.select_one(".teamHome").text.strip()
+            away = block.select_one(".teamAway").text.strip()
+
+            score = block.select_one(".score")
+            if score:
+                sh, sa = score.text.strip().split("‑")
+            else:
+                sh, sa = "-", "-"
+
+            minute_tag = block.select_one(".minute")
+            minute = minute_tag.text.strip() if minute_tag else "?"
+
+            league_tag = block.select_one(".competition")
+            league = league_tag.text.strip() if league_tag else "Football"
+
+            matches.append({
+                "home": home,
+                "away": away,
+                "sh": sh,
+                "sa": sa,
+                "minute": minute,
+                "league": league
+            })
+        except Exception as e:
+            continue
+
     return matches
 
 # ================= MATCHS DU JOUR =================
@@ -95,8 +120,8 @@ async def post_today(session):
     if state.get("date") == str(date.today()):
         return
 
-    data = await fetch_json(session)
-    matches = parse_matches_json(data)
+    soup = await fetch(session)
+    matches = parse_lequipe_matches(soup)
 
     if not matches:
         return
@@ -104,8 +129,10 @@ async def post_today(session):
     lines = [f"⚔️ {m['home']} vs {m['away']}" for m in matches[:20]]
 
     await send(
-        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n" + "\n".join(lines)
+        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
+        + "\n".join(lines)
     )
+
     save(FILES["today"], {"date": str(date.today())})
 
 # ================= LIVE HORAIRE =================
@@ -116,8 +143,9 @@ async def hourly_live(session):
     if state.get("hour") == hour:
         return
 
-    data = await fetch_json(session)
-    matches = parse_matches_json(data)
+    soup = await fetch(session)
+    matches = parse_lequipe_matches(soup)
+    logger.info(f"⚽ Live détectés : {len(matches)}")
 
     if not matches:
         return
@@ -127,25 +155,29 @@ async def hourly_live(session):
         for m in matches[:15]
     ]
 
-    await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines))
+    await send(
+        "🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines)
+    )
+
     save(FILES["hour"], {"hour": hour})
 
-# ================= MI-TEMPS =================
+# ================= MI‑TEMPS =================
 async def halftime_events(session):
-    data = await fetch_json(session)
-    matches = parse_matches_json(data)
+    soup = await fetch(session)
+    matches = parse_lequipe_matches(soup)
 
     for m in matches:
-        if m["minute"] in ["HT", "HT1H", "HT2H"]:
+        if m["minute"].lower() in ["mi‑temps", "mi‑temps", "HT"]:  # selon affichage L'Équipe
             key = f"{m['home']}-{m['away']}-HT"
             if key in events_posted:
                 continue
 
             await send(
-                f"⏸ *MI-TEMPS*\n\n"
+                f"⏸ *MI‑TEMPS*\n\n"
                 f"{m['home']} {m['sh']}–{m['sa']} {m['away']}\n"
                 f"🏆 {m['league']}"
             )
+
             events_posted.add(key)
 
     save(FILES["events"], list(events_posted))

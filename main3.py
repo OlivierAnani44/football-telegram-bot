@@ -6,6 +6,11 @@ from datetime import datetime, date
 from telegram import Bot
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
+import subprocess
+
+# Installer Chromium si nécessaire
+subprocess.run(["playwright", "install", "chromium"], check=True)
+
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")

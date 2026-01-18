@@ -1,18 +1,18 @@
 import os
 import asyncio
-import aiohttp
 import json
 import logging
 from datetime import datetime, date
-from bs4 import BeautifulSoup
 from telegram import Bot
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-# URL pour les directs football de L’Équipe
-BASE_URL = "https://www.lequipe.fr/Football/Directs"
+LEQUIPE_URL = "https://www.lequipe.fr/Football/Directs"
 
 FILES = {
     "startup": "startup.json",
@@ -28,7 +28,6 @@ bot = Bot(BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FootballBot")
 
-# ================= UTILS =================
 def load(file, default):
     if os.path.exists(file):
         with open(file, "r", encoding="utf-8") as f:
@@ -65,41 +64,39 @@ async def startup():
         )
         save(FILES["startup"], {"ok": True})
 
-# ================= SCRAPING =================
-async def fetch(session):
-    async with session.get(
-        BASE_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept-Language": "fr-FR,fr;q=0.9"
-        }
-    ) as r:
-        text = await r.text()
-        # Supprime le bloc de cookies si nécessaire
-        return BeautifulSoup(text, "html.parser")
+# ================= SELENIUM =================
+def init_driver():
+    options = Options()
+    options.add_argument("--headless")  # sans interface graphique
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--lang=fr-FR")
+    driver = webdriver.Chrome(options=options)
+    return driver
 
-def parse_lequipe_matches(soup):
+def parse_matches(driver):
+    driver.get(LEQUIPE_URL)
+    # laisse la page charger complètement
+    driver.implicitly_wait(5)
+
     matches = []
 
-    # Exemple : les scores sont dans des <div class="score ..."> …
-    # On suppose que chaque rencontre a des classes .directMatch ou .matchBlock
-    # Tu peux adapter selon le HTML réel (inspecte avec DevTools)
-    for block in soup.select("div.directMatch, div.matchBlock"):
+    # Chaque match est dans un bloc "DirectMatch" ou "match-block" selon l'HTML
+    match_blocks = driver.find_elements(By.CSS_SELECTOR, "div.match-block, div.DirectMatch")
+    for block in match_blocks:
         try:
-            home = block.select_one(".teamHome").text.strip()
-            away = block.select_one(".teamAway").text.strip()
-
-            score = block.select_one(".score")
-            if score:
-                sh, sa = score.text.strip().split("‑")
+            home = block.find_element(By.CSS_SELECTOR, ".teamHome, .team.home").text.strip()
+            away = block.find_element(By.CSS_SELECTOR, ".teamAway, .team.away").text.strip()
+            score_el = block.find_element(By.CSS_SELECTOR, ".score")
+            score_text = score_el.text.strip() if score_el else "-"
+            if "-" in score_text:
+                sh, sa = [s.strip() for s in score_text.split("-")]
             else:
                 sh, sa = "-", "-"
-
-            minute_tag = block.select_one(".minute")
-            minute = minute_tag.text.strip() if minute_tag else "?"
-
-            league_tag = block.select_one(".competition")
-            league = league_tag.text.strip() if league_tag else "Football"
+            minute_el = block.find_element(By.CSS_SELECTOR, ".minute")
+            minute = minute_el.text.strip() if minute_el else "?"
+            league_el = block.find_element(By.CSS_SELECTOR, ".competition")
+            league = league_el.text.strip() if league_el else "Football"
 
             matches.append({
                 "home": home,
@@ -109,88 +106,65 @@ def parse_lequipe_matches(soup):
                 "minute": minute,
                 "league": league
             })
-        except Exception as e:
+        except:
             continue
 
     return matches
 
 # ================= MATCHS DU JOUR =================
-async def post_today(session):
+async def post_today(driver):
     state = load(FILES["today"], {})
     if state.get("date") == str(date.today()):
         return
 
-    soup = await fetch(session)
-    matches = parse_lequipe_matches(soup)
-
+    matches = parse_matches(driver)
     if not matches:
         return
 
     lines = [f"⚔️ {m['home']} vs {m['away']}" for m in matches[:20]]
-
-    await send(
-        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
-        + "\n".join(lines)
-    )
-
+    await send(f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n" + "\n".join(lines))
     save(FILES["today"], {"date": str(date.today())})
 
 # ================= LIVE HORAIRE =================
-async def hourly_live(session):
+async def hourly_live(driver):
     hour = datetime.now().strftime("%Y-%m-%d-%H")
     state = load(FILES["hour"], {})
-
     if state.get("hour") == hour:
         return
 
-    soup = await fetch(session)
-    matches = parse_lequipe_matches(soup)
+    matches = parse_matches(driver)
     logger.info(f"⚽ Live détectés : {len(matches)}")
-
     if not matches:
         return
 
-    lines = [
-        f"🔴 {m['home']} {m['sh']}–{m['sa']} {m['away']} ({m['minute']})"
-        for m in matches[:15]
-    ]
-
-    await send(
-        "🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines)
-    )
-
+    lines = [f"🔴 {m['home']} {m['sh']}–{m['sa']} {m['away']} ({m['minute']})" for m in matches[:15]]
+    await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines))
     save(FILES["hour"], {"hour": hour})
 
 # ================= MI‑TEMPS =================
-async def halftime_events(session):
-    soup = await fetch(session)
-    matches = parse_lequipe_matches(soup)
-
+async def halftime_events(driver):
+    matches = parse_matches(driver)
     for m in matches:
-        if m["minute"].lower() in ["mi‑temps", "mi‑temps", "HT"]:  # selon affichage L'Équipe
+        if m["minute"].lower() in ["mi‑temps", "ht"]:
             key = f"{m['home']}-{m['away']}-HT"
             if key in events_posted:
                 continue
-
-            await send(
-                f"⏸ *MI‑TEMPS*\n\n"
-                f"{m['home']} {m['sh']}–{m['sa']} {m['away']}\n"
-                f"🏆 {m['league']}"
-            )
-
+            await send(f"⏸ *MI‑TEMPS*\n\n{m['home']} {m['sh']}–{m['sa']} {m['away']}\n🏆 {m['league']}")
             events_posted.add(key)
-
     save(FILES["events"], list(events_posted))
 
 # ================= MAIN =================
 async def main():
     await startup()
-    async with aiohttp.ClientSession() as session:
+    driver = init_driver()
+    try:
         while True:
-            await post_today(session)
-            await hourly_live(session)
-            await halftime_events(session)
+            await post_today(driver)
+            await hourly_live(driver)
+            await halftime_events(driver)
             await asyncio.sleep(60)
+    finally:
+        driver.quit()
 
 if __name__ == "__main__":
     asyncio.run(main())

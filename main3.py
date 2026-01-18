@@ -13,9 +13,11 @@ SCOREBAT_API = "https://www.scorebat.com/video-api/v3/"
 POSTED_FILE = "posted.json"
 
 CHECK_INTERVAL = 300  # 5 minutes
+VIDEOS_LIMIT = 3      # nombre max de vidéos par match
+EMBED_MAX_LENGTH = 800  # tronquer l'embed si trop long
 
 # ================= LOG =================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ScoreBatBot")
 
 # ================= UTILS =================
@@ -29,6 +31,15 @@ def save_posted(data):
     with open(POSTED_FILE, "w") as f:
         json.dump(list(data), f)
 
+def format_date(date_str):
+    if not date_str:
+        return "Unknown date"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%d/%m/%Y %H:%M UTC")
+    except Exception:
+        return date_str
+
 # ================= TELEGRAM =================
 async def send_message(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -37,24 +48,30 @@ async def send_message(text):
         "text": text,
         "disable_web_page_preview": False
     }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=payload)
-        if r.status_code != 200:
-            logger.error(f"Telegram error {r.status_code}: {r.text}")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, json=payload)
+            r.raise_for_status()
+            logger.info("Message sent successfully")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Telegram error {e.response.status_code}: {e.response.text}")
+    except Exception as e:
+        logger.error(f"Error sending Telegram message: {e}")
 
 # ================= SCOREBAT =================
 async def fetch_matches():
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(SCOREBAT_API)
         r.raise_for_status()
-        return r.json()["response"]
+        data = r.json()
+        return data.get("response", [])
 
 # ================= MAIN LOGIC =================
 async def process_matches():
     posted = load_posted()
     matches = await fetch_matches()
 
+    new_posts = 0
     for match in matches:
         match_id = match.get("title")
         if not match_id or match_id in posted:
@@ -62,7 +79,7 @@ async def process_matches():
 
         competition = match.get("competition", {}).get("name", "Unknown league")
         title = match.get("title", "Match")
-        date = match.get("date", "")
+        date = format_date(match.get("date"))
         url = match.get("matchviewUrl", "")
         videos = match.get("videos", [])
 
@@ -72,8 +89,11 @@ async def process_matches():
 
         if videos:
             message += "🎥 Highlights & Goals:\n"
-            for v in videos[:3]:
-                message += f"▶️ {v.get('title')}\n{v.get('embed')}\n\n"
+            for v in videos[:VIDEOS_LIMIT]:
+                embed = v.get("embed", "")
+                if len(embed) > EMBED_MAX_LENGTH:
+                    embed = embed[:EMBED_MAX_LENGTH] + "..."
+                message += f"▶️ {v.get('title')}\n{embed}\n\n"
         else:
             message += "❌ No video available\n"
 
@@ -81,10 +101,15 @@ async def process_matches():
 
         await send_message(message)
         posted.add(match_id)
-        save_posted(posted)
+        new_posts += 1
 
-        logger.info(f"Posted: {title}")
-        await asyncio.sleep(3)
+        await asyncio.sleep(3)  # éviter de spammer Telegram
+
+    if new_posts > 0:
+        save_posted(posted)
+        logger.info(f"Posted {new_posts} new matches")
+    else:
+        logger.info("No new matches to post")
 
 # ================= LOOP =================
 async def main():
@@ -93,7 +118,7 @@ async def main():
         try:
             await process_matches()
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error in main loop: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":

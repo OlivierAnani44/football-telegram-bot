@@ -1,27 +1,27 @@
 import os
-import json
 import asyncio
 import aiohttp
+import json
 import logging
-from datetime import datetime, date
+from datetime import date
 from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
-SPORTDB_API_KEY = os.getenv("SPORTDB_API_KEY")
+SPORTDB_API_KEY = os.getenv("SPORTDB_API_KEY", "1")
 
-API_BASE = "https://sportdb.dev/api/football"
+API_BASE = f"https://www.thesportsdb.com/api/v1/json/{SPORTDB_API_KEY}"
 
 FILES = {
     "startup": "startup.json",
     "today": "today.json",
-    "events": "events.json",
-    "hour": "hour.json"
+    "events": "events.json"
 }
 
 DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
+# ================= INIT =================
 bot = Bot(BOT_TOKEN)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FootballBot")
@@ -39,7 +39,7 @@ def save(file, data):
 
 events_posted = set(load(FILES["events"], []))
 
-# ================= TELEGRAM =================
+# ================= SEND =================
 async def send(text):
     for ch in CHANNELS:
         await bot.send_photo(
@@ -48,97 +48,96 @@ async def send(text):
             caption=text,
             parse_mode="Markdown"
         )
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2)
+
+# ================= API =================
+async def api_get(session, endpoint):
+    url = f"{API_BASE}/{endpoint}"
+    async with session.get(url) as r:
+        if r.status != 200:
+            raise Exception(f"API ERROR {r.status}")
+        return await r.json()
 
 # ================= STARTUP =================
 async def startup():
     if not os.path.exists(FILES["startup"]):
         await send(
-            "👋 *Bot Football activé*\n\n"
-            "⚽ Scores en direct\n"
-            "📅 Matchs du jour\n"
-            "⏸ Mi-temps\n\n"
+            "👋 *Bot Football ACTIF*\n\n"
+            "⚽ Matchs du jour\n"
+            "🔴 Live scores\n"
+            "⏸ Mi-temps\n"
+            "🏁 Scores finaux\n\n"
             "🔥 Bon match à tous !"
         )
         save(FILES["startup"], {"ok": True})
 
-# ================= API =================
-async def api_get(session, endpoint):
-    headers = {"Authorization": f"Bearer {SPORTDB_API_KEY}"}
-    async with session.get(f"{API_BASE}/{endpoint}", headers=headers) as r:
-        return await r.json()
-
 # ================= MATCHS DU JOUR =================
 async def post_today(session):
+    today = date.today().strftime("%Y-%m-%d")
     state = load(FILES["today"], {})
-    today = str(date.today())
 
     if state.get("date") == today:
         return
 
-    data = await api_get(session, "fixtures")
-    matches = [
-        m for m in data.get("data", [])
-        if m.get("date", "").startswith(today)
-    ]
+    data = await api_get(session, f"eventsday.php?d={today}&s=Soccer")
+    events = data.get("events")
 
-    if not matches:
+    if not events:
         return
 
-    lines = [
-        f"⚔️ {m['home_team']['name']} vs {m['away_team']['name']}"
-        for m in matches[:20]
-    ]
+    lines = []
+    for e in events[:20]:
+        lines.append(f"⚔️ {e['strHomeTeam']} vs {e['strAwayTeam']}")
 
     await send(
-        f"📅 *MATCHS DU JOUR ({date.today().strftime('%d/%m')})*\n\n"
-        + "\n".join(lines)
+        f"📅 *MATCHS DU JOUR ({today})*\n\n" + "\n".join(lines)
     )
 
     save(FILES["today"], {"date": today})
 
-# ================= LIVE =================
-async def post_live(session):
-    hour = datetime.utcnow().strftime("%Y-%m-%d-%H")
-    state = load(FILES["hour"], {})
+# ================= LIVE + EVENTS =================
+async def live_events(session):
+    data = await api_get(session, "livescore.php?s=Soccer")
+    events = data.get("events")
 
-    if state.get("hour") == hour:
+    if not events:
         return
 
-    data = await api_get(session, "live")
-    matches = data.get("data", [])
+    live_lines = []
 
-    if not matches:
-        return
+    for e in events:
+        event_id = e["idEvent"]
+        home = e["strHomeTeam"]
+        away = e["strAwayTeam"]
+        sh = e["intHomeScore"]
+        sa = e["intAwayScore"]
+        status = e.get("strStatus", "LIVE")
 
-    lines = [
-        f"🔴 {m['home_team']['name']} {m['score']['home']}–{m['score']['away']} "
-        f"{m['away_team']['name']} ({m['minute']}′)"
-        for m in matches[:15]
-    ]
+        # LIVE MESSAGE
+        live_lines.append(f"🔴 {home} {sh}–{sa} {away}")
 
-    await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(lines))
-    save(FILES["hour"], {"hour": hour})
+        # MI-TEMPS
+        if status == "HT":
+            key = f"{event_id}-HT"
+            if key not in events_posted:
+                await send(
+                    f"⏸ *MI-TEMPS*\n\n"
+                    f"{home} {sh}–{sa} {away}"
+                )
+                events_posted.add(key)
 
-# ================= MI-TEMPS =================
-async def halftime(session):
-    data = await api_get(session, "live")
-    matches = data.get("data", [])
+        # FIN DE MATCH
+        if status == "FT":
+            key = f"{event_id}-FT"
+            if key not in events_posted:
+                await send(
+                    f"🏁 *FIN DU MATCH*\n\n"
+                    f"{home} {sh}–{sa} {away}"
+                )
+                events_posted.add(key)
 
-    for m in matches:
-        if m.get("status") == "HT":
-            key = f"{m['id']}-HT"
-            if key in events_posted:
-                continue
-
-            await send(
-                f"⏸ *MI-TEMPS*\n\n"
-                f"{m['home_team']['name']} {m['score']['home']}–{m['score']['away']} "
-                f"{m['away_team']['name']}\n"
-                f"🏆 {m['league']['name']}"
-            )
-
-            events_posted.add(key)
+    if live_lines:
+        await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(live_lines[:15]))
 
     save(FILES["events"], list(events_posted))
 
@@ -148,9 +147,12 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         while True:
-            await post_today(session)
-            await post_live(session)
-            await halftime(session)
+            try:
+                await post_today(session)
+                await live_events(session)
+            except Exception as e:
+                logger.error(e)
+
             await asyncio.sleep(60)
 
 if __name__ == "__main__":

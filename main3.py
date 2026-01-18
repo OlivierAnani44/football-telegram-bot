@@ -1,32 +1,43 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import Bot
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 SCOREBAT_API = "https://www.scorebat.com/video-api/v3/"
-MAX_MESSAGE_LENGTH = 4000  # Pour Telegram
+MAX_MESSAGE_LENGTH = 4000
 
 async def fetch_matches():
     async with aiohttp.ClientSession() as session:
         async with session.get(SCOREBAT_API) as resp:
             data = await resp.json()
             matches = []
-            response_list = data.get("response", [])
+            today = datetime.now(timezone.utc).date()  # date UTC du jour
             
-            for i, match in enumerate(response_list):
-                # Vérifie le type exact
+            for i, match in enumerate(data.get("response", [])):
                 if isinstance(match, dict):
                     title = match.get("title", "Match inconnu")
                     comp = match.get("competition", {})
-                    competition_name = comp.get("name", "Compétition inconnue") if isinstance(comp, dict) else "Compétition inconnue"
-                    date = match.get("date", "Date inconnue")
-                    matches.append(f"{title} - {competition_name} ({date})")
+                    competition_name = comp.get("name", "Inconnue") if isinstance(comp, dict) else "Inconnue"
+                    date_str = match.get("date")
+                    
+                    # Filtrer uniquement les matchs d'aujourd'hui
+                    if date_str:
+                        try:
+                            match_date = datetime.fromisoformat(date_str.replace("Z", "+00:00")).date()
+                        except ValueError:
+                            continue
+                        if match_date != today:
+                            continue  # ignorer les matchs d'autres jours
+                    else:
+                        continue
+                    
+                    matches.append(f"{title} - {competition_name} ({date_str})")
                 else:
-                    # Ignore tout ce qui n'est pas un dict
-                    print(f"Ignoré {i}: type={type(match)}, valeur={match}")
+                    # Ignorer tout ce qui n'est pas un dict
+                    continue
             return matches
 
 def split_message(text, max_length=MAX_MESSAGE_LENGTH):
@@ -47,7 +58,7 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     matches = await fetch_matches()
     if not matches:
-        print("Aucun match trouvé aujourd'hui")
+        print("Aucun match trouvé pour aujourd'hui")
         return
 
     header = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"

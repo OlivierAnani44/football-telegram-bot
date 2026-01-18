@@ -6,34 +6,46 @@ from telegram import Bot
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # Exemple : @ton_canal
-RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"  # RSS football BBC FR
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # @ton_canal
+RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 CHECK_INTERVAL = 3600  # 1 heure
-POSTED_FILE = "posted_matches.txt"  # Pour ne pas reposter le même match
+POSTED_FILE = "posted_matches.txt"
+MAX_MESSAGE_LENGTH = 3500  # Telegram max 4096, on laisse une marge
 
 # ================= FONCTIONS =================
 def load_posted():
-    """Charge les matchs déjà postés"""
     if not os.path.exists(POSTED_FILE):
         return set()
     with open(POSTED_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f.readlines())
 
 def save_posted(posted):
-    """Sauvegarde les matchs postés"""
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         for match in posted:
             f.write(match + "\n")
 
 async def fetch_matches():
-    """Récupère les matchs depuis le RSS"""
     feed = feedparser.parse(RSS_URL)
     matches = []
     for entry in feed.entries:
-        title = entry.title.strip()
-        published = entry.published if "published" in entry else ""
-        matches.append(f"{title} ({published})")
+        # On garde juste le titre pour réduire la taille
+        matches.append(entry.title.strip())
     return matches
+
+def split_messages(text, max_length):
+    """Découpe le texte en plusieurs messages si nécessaire"""
+    lines = text.split("\n")
+    messages = []
+    current_msg = ""
+    for line in lines:
+        if len(current_msg) + len(line) + 1 > max_length:
+            messages.append(current_msg)
+            current_msg = line
+        else:
+            current_msg += "\n" + line if current_msg else line
+    if current_msg:
+        messages.append(current_msg)
+    return messages
 
 async def post_matches(bot):
     posted = load_posted()
@@ -44,11 +56,14 @@ async def post_matches(bot):
         print("Aucun nouveau match à poster")
         return
     
-    message = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"
-    message += "\n".join(new_matches)
+    header = f"⚽ Matchs du jour ({datetime.now().strftime('%d/%m/%Y')}):\n\n"
+    message_text = header + "\n".join(new_matches)
+    
+    messages = split_messages(message_text, MAX_MESSAGE_LENGTH)
     
     try:
-        await bot.send_message(chat_id=CHANNEL_ID, text=message)
+        for msg in messages:
+            await bot.send_message(chat_id=CHANNEL_ID, text=msg)
         print(f"{len(new_matches)} match(es) posté(s) sur Telegram !")
         posted.update(new_matches)
         save_posted(posted)

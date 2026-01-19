@@ -16,8 +16,9 @@ CHANNELS = [ch.strip() for ch in os.getenv("CHANNELS", "").split(",") if ch.stri
 RSS_FEED = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 TEMP_IMAGE_FILE = "/tmp/image.jpg"
 POSTED_FILE = "posted.json"
-POST_INTERVAL = 30 * 60  # 30 minutes en secondes
+POST_INTERVAL = 30 * 60  # 30 minutes
 
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -104,7 +105,6 @@ def format_message(title, summary, published):
     header = random.choice(TITLE_VARIANTS)
     hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
     comment = random.choice(COMMENT_VARIANTS)
-
     return f"""
 🔥🔥 <b>{header} :</b> <i>{title}</i>
 
@@ -119,25 +119,50 @@ def format_message(title, summary, published):
 <b>{comment}</b>
 """.strip()
 
-# ---------------- TRI DES ARTICLES ----------------
-def sort_entries(entries):
-    # Critère simple : longueur du résumé + présence de mots clés importants
-    keywords = ["goal", "but", "score", "victoire", "défaite", "titre", "championnat"]
-    def importance(entry):
-        summary = re.sub("<.*?>", "", entry.get("summary", "")).lower()
-        score = len(summary.split())
-        score += sum(word in summary for word in keywords) * 10
-        return score
-    return sorted(entries, key=importance, reverse=True)
+# ---------------- TRI INTELLIGENT ----------------
+def compute_importance(entry):
+    summary = re.sub("<.*?>", "", entry.get("summary", "")).lower()
+    title = entry.get("title", "").lower()
+
+    keywords_priority = {
+        "goal": 10,
+        "but": 10,
+        "score": 8,
+        "victoire": 8,
+        "défaite": 8,
+        "titre": 7,
+        "championnat": 6,
+        "afcon": 12,
+        "afrique": 10,
+        "international": 8,
+        "match important": 12,
+        "résultat": 7
+    }
+
+    score = len(summary.split())  # longueur du résumé
+    for kw, val in keywords_priority.items():
+        if kw in summary or kw in title:
+            score += val
+
+    return score
+
+def select_most_important(entries, posted):
+    # Filtrer les articles déjà postés
+    candidates = [e for e in entries if (e.get("id") or e.get("link") or e.get("title")) not in posted]
+    if not candidates:
+        return None
+
+    # Trier par score d'importance
+    candidates.sort(key=compute_importance, reverse=True)
+    return candidates[0]  # Retourne le plus important
 
 # ---------------- POST ----------------
 async def post_entry(entry, posted):
     title = await translate(entry.get("title", ""))
     summary = await translate(re.sub("<.*?>", "", entry.get("summary", "")))
     published = entry.get("published", "—")
-
-    # Vérifier si déjà posté
     entry_id = entry.get("id") or entry.get("link") or title
+
     if entry_id in posted:
         return False
 
@@ -173,16 +198,18 @@ async def post_entry(entry, posted):
 # ---------------- MAIN LOOP ----------------
 async def main_loop():
     posted = load_posted()
-    logger.info("🤖 Bot lancé et en attente de posts toutes les 30 minutes")
+    logger.info("🤖 Bot lancé et va poster un seul post toutes les 30 minutes")
 
     while True:
         feed = feedparser.parse(RSS_FEED)
-        entries = feed.entries[:20]  # On prend max 20 pour éviter surcharge
-        entries = sort_entries(entries)
+        entries = feed.entries[:30]  # On prend les 30 derniers posts
 
-        for entry in entries:
-            await post_entry(entry, posted)
-            await asyncio.sleep(5)
+        # Sélection du post le plus important
+        post_to_send = select_most_important(entries, posted)
+        if post_to_send:
+            await post_entry(post_to_send, posted)
+        else:
+            logger.info("⚠️ Aucun nouveau post à publier")
 
         logger.info(f"⏳ Attente de {POST_INTERVAL//60} minutes avant le prochain post")
         await asyncio.sleep(POST_INTERVAL)

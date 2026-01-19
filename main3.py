@@ -1,95 +1,109 @@
 import os
 import asyncio
 import httpx
-import logging
 from datetime import date
+import logging
 
 # ================= CONFIG =================
-SPORTMONKS_API_TOKEN = os.getenv("SPORTMONKS_API_TOKEN")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # @channel ou chat_id
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Ton token Telegram
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
+SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")  # Ton token SportMonks
 
-# ================= INIT =================
+BASE_URL = "https://soccer.sportmonks.com/api/v3/football/"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FootballBot")
 
-# ================= UTIL =================
-def check_tokens():
-    missing = []
-    if not SPORTMONKS_API_TOKEN:
-        missing.append("SPORTMONKS_API_TOKEN")
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
-    if missing:
-        raise RuntimeError(f"⚠️ Les variables suivantes sont manquantes : {', '.join(missing)}")
+# ================= TELEGRAM =================
+async def send_telegram(text, photo=None):
+    for ch in CHANNELS:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        if photo:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        async with httpx.AsyncClient() as client:
+            try:
+                if photo:
+                    await client.post(url, data={"chat_id": ch, "caption": text}, files={"photo": photo})
+                else:
+                    await client.post(url, data={"chat_id": ch, "text": text, "parse_mode": "Markdown"})
+            except Exception as e:
+                logger.error(f"Telegram send error: {e}")
 
-async def send_message(text: str):
-    """Envoi d'un message Telegram."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(url, json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "Markdown"
-            })
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Erreur Telegram : {e.response.status_code} - {e.response.text}")
-
-async def sportmonks_get(endpoint: str, params: dict = None):
-    """Requête vers SportMonks API."""
+# ================= SPORTMONKS =================
+async def sportmonks_get(endpoint, params=None):
     if params is None:
         params = {}
-    params["api_token"] = SPORTMONKS_API_TOKEN
-    url = f"https://soccer.sportmonks.com/api/v3/football/{endpoint}"
+    params["api_token"] = SPORTMONKS_TOKEN
     async with httpx.AsyncClient() as client:
-        r = await client.get(url, params=params)
+        r = await client.get(BASE_URL + endpoint, params=params)
         r.raise_for_status()
         return r.json()
 
-# ================= LOGIQUE =================
+# ================= FIXTURES DU JOUR =================
 async def post_today():
-    today = date.today().isoformat()
-    try:
-        data = await sportmonks_get(f"fixtures/date/{today}", params={
-            "include": "localTeam,visitorTeam,highlights,scores"
-        })
-        fixtures = data.get("data", [])
-        if not fixtures:
-            await send_message("⚠️ Aucune donnée pour aujourd'hui.")
-            return
+    today_str = date.today().isoformat()
+    data = await sportmonks_get("fixtures", params={
+        "date": today_str,
+        "include": "localTeam,visitorTeam,highlights"
+    })
 
-        lines = []
-        for f in fixtures[:10]:  # limiter à 10 matchs
-            home = f.get("localTeam", {}).get("data", {}).get("name", "Home")
-            away = f.get("visitorTeam", {}).get("data", {}).get("name", "Away")
-            score_home = f.get("scores", {}).get("localteam_score", "-")
-            score_away = f.get("scores", {}).get("visitorteam_score", "-")
-            highlight = f.get("highlights", {}).get("data", [{}])[0].get("url", "")
+    if "data" not in data or not data["data"]:
+        logger.info("Aucune donnée aujourd'hui")
+        return
 
-            line = f"⚽ {home} {score_home}–{score_away} {away}"
-            if highlight:
-                line += f"\n🎥 [Vidéo du but]({highlight})"
-            lines.append(line)
+    messages = []
+    for match in data["data"]:
+        home = match["localTeam"]["data"]["name"]
+        away = match["visitorTeam"]["data"]["name"]
+        score_home = match.get("scores", {}).get("localteam_score", "-")
+        score_away = match.get("scores", {}).get("visitorteam_score", "-")
+        minute = match.get("time", {}).get("minute", "?")
 
-        await send_message("*MATCHS DU JOUR:*\n\n" + "\n\n".join(lines))
-    except httpx.HTTPStatusError as e:
-        await send_message(f"⚠️ Erreur SportMonks : {e.response.status_code} - {e.response.text}")
-    except Exception as e:
-        await send_message(f"⚠️ Erreur inattendue : {e}")
+        msg = f"⚽ {home} {score_home}-{score_away} {away} ({minute}')"
+        messages.append(msg)
 
-# ================= MAIN =================
-async def main():
-    try:
-        check_tokens()
-        await send_message("🚀 Bot football démarré ✅")
-        await post_today()
-    except RuntimeError as e:
-        logger.error(e)
-        print(e)
+        # Highlights vidéo
+        if "highlights" in match and match["highlights"]["data"]:
+            for hl in match["highlights"]["data"]:
+                video_url = hl.get("video_url")
+                if video_url:
+                    await send_telegram(f"🎥 Highlight: {home} vs {away}\n{video_url}")
+
+    # Envoyer tous les matchs du jour
+    if messages:
+        text = f"📅 *Fixtures du jour ({today_str})*\n\n" + "\n".join(messages)
+        await send_telegram(text)
+
+# ================= LIVE SCORES =================
+async def post_live():
+    data = await sportmonks_get("fixtures", params={
+        "status": "LIVE",
+        "include": "localTeam,visitorTeam,highlights"
+    })
+
+    if "data" not in data or not data["data"]:
+        logger.info("Aucun match en live")
+        return
+
+    for match in data["data"]:
+        home = match["localTeam"]["data"]["name"]
+        away = match["visitorTeam"]["data"]["name"]
+        score_home = match.get("scores", {}).get("localteam_score", "-")
+        score_away = match.get("scores", {}).get("visitorteam_score", "-")
+        minute = match.get("time", {}).get("minute", "?")
+        msg = f"🔴 Live: {home} {score_home}-{score_away} {away} ({minute}')"
+        await send_telegram(msg)
+
+# ================= MAIN LOOP =================
+async def main_loop():
+    while True:
+        try:
+            await post_today()
+            await post_live()
+        except Exception as e:
+            logger.error(f"Erreur: {e}")
+            await send_telegram(f"⚠️ Erreur dans le bot : {e}")
+        await asyncio.sleep(60)  # Vérifie toutes les 60 secondes
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_loop())

@@ -1,6 +1,6 @@
 import os
 import logging
-from deep_translator import LibreTranslator, GoogleTranslator, PonsTranslator, DeepL
+from deep_translator import LibreTranslator, GoogleTranslator, PonsTranslator
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

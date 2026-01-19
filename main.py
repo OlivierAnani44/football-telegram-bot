@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import asyncio
 from telegram import Bot
-from deep_translator import GoogleTranslator, LibreTranslator, DeeplTranslator
+from deep_translator import GoogleTranslator, LibreTranslator
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -42,7 +42,6 @@ async def translate_text(text):
     translators = [
         ("Google", GoogleTranslator(source='auto', target='fr')),
         ("Libre", LibreTranslator(source='auto', target='fr')),
-        # ("DeepL", DeeplTranslator(source='auto', target='fr')), # Décommenter si clé DeepL
     ]
     for name, translator in translators:
         try:
@@ -51,15 +50,32 @@ async def translate_text(text):
             return translated
         except Exception as e:
             logger.error(f"❌ {name} Translator erreur : {e}")
-    # fallback : texte original
     return text
+
+def format_text(text):
+    """
+    Formate le texte en HTML pour Telegram :
+    - Titre en gras
+    - Premier paragraphe en italique
+    - Citation pour le reste
+    """
+    lines = text.split("\n")
+    if not lines:
+        return text
+
+    title = f"<b>{lines[0]}</b>" if lines[0] else ""
+    italic_line = f"<i>{lines[1]}</i>" if len(lines) > 1 else ""
+    quote_lines = "\n".join([f"“{l}”" for l in lines[2:]]) if len(lines) > 2 else ""
+    
+    formatted = "\n".join(filter(None, [title, italic_line, quote_lines]))
+    return formatted
 
 async def publish_telegram(text, image_path=None):
     for ch in CHANNELS:
         try:
             if image_path and os.path.exists(image_path):
                 with open(image_path, "rb") as img:
-                    await bot.send_photo(chat_id=ch, photo=img, caption=text)
+                    await bot.send_photo(chat_id=ch, photo=img, caption=text, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id=ch, text=text, parse_mode="HTML")
             logger.info(f"✅ Publié sur {ch}")
@@ -78,23 +94,23 @@ async def main():
     for entry in feed.entries[:5]:  # prend les 5 derniers
         title = entry.get("title", "")
         summary = entry.get("summary", "")
-        link = entry.get("link", "")
-        text = f"{title}\n{summary}\n{link}"
-        
-        # Enregistre temporairement
-        with open(TEMP_TEXT_FILE, "w", encoding="utf-8") as f:
-            f.write(text)
-        
+
+        # Texte brut sans lien
+        text = f"{title}\n{summary}"
+
         # Télécharge l'image si présente
         image_url = entry.get("media_content", [{}])[0].get("url")
         image_path = await download_image(image_url) if image_url else None
         
         # Traduction
         translated_text = await translate_text(text)
-        logger.info(f"Texte traduit : {translated_text}")
+        
+        # Mise en forme HTML
+        formatted_text = format_text(translated_text)
+        logger.info(f"Texte formaté : {formatted_text}")
         
         # Publication
-        await publish_telegram(translated_text, image_path)
+        await publish_telegram(formatted_text, image_path)
         await asyncio.sleep(5)  # petit délai pour éviter le spam
 
 if __name__ == "__main__":

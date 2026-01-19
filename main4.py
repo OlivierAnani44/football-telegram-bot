@@ -92,9 +92,18 @@ def format_message(title, summary):
     header = random.choice(TITLE_VARIANTS)
     hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
     comment = random.choice(COMMENT_VARIANTS)
-    return f"""🔥🔥 <b>{header} :</b> <i>{title}</i>
+    
+    # Ajout d'espaces entre les sections
+    return f"""🔥🔥 <b>{header} :</b>
+
+<i>{title}</i>
+
 <blockquote>{summary}</blockquote>
-{hashtags} <b>{comment}</b>""".strip()
+
+{hashtags}
+
+<b>{comment}</b>""".strip()
+
 
 # ---------------- TRI INTELLIGENT ----------------
 def compute_importance(entry):

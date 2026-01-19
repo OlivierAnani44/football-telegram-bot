@@ -1,233 +1,151 @@
 import os
-import feedparser
 import json
 import asyncio
-import logging
-import re
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
-from bs4 import BeautifulSoup
-import random
-from datetime import datetime
-from html import escape as html_escape
 import aiohttp
-from deep_translator import DeeplTranslator
+import logging
+from datetime import date, datetime
+from telegram import Bot
 
-# ---------------- CONFIGURATION ----------------
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = os.getenv("CHANNELS")  # Séparés par des virgules
-CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
+CHANNELS = [c.strip() for c in os.getenv("CHANNELS", "").split(",") if c.strip()]
 
-RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/sport/football/rss.xml"
-]
+SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
 
-POSTED_FILE = "posted.json"
+BASE_URL = "https://api.sportmonks.com/v3/football"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
-
-# ---------------- EMOJIS, ACCROCHES, HASHTAGS ----------------
-EMOJI_CATEGORIES = {
-    'match': ['⚽', '🏆', '🔥', '🎯'],
-    'transfert': ['🔄', '💰', '👤'],
-    'résultat': ['🏅', '📊', '⚡'],
-    'general': ['📰', '🔥', '🚀', '💥']
+FILES = {
+    "startup": "startup.json",
+    "today": "today.json",
+    "events": "events.json"
 }
 
-PHRASES_ACCROCHE = {
-    'general': ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
-}
+DEFAULT_IMAGE = "https://i.imgur.com/8QfYJZK.jpg"
 
-HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
+bot = Bot(BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("FootballBot")
 
-bot = Bot(token=BOT_TOKEN)
+# ================= UTILS =================
+def load(file, default):
+    if os.path.exists(file):
+        with open(file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return default
 
-# ---------------- GESTION DES LIENS DÉJÀ POSTÉS ----------------
-def load_posted_links():
-    try:
-        if os.path.exists(POSTED_FILE):
-            with open(POSTED_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {ch: set(links) for ch, links in data.items()}
-    except Exception as e:
-        logger.error(f"❌ Erreur chargement: {e}")
-    return {ch: set() for ch in CHANNELS}
+def save(file, data):
+    with open(file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
 
-def save_posted_links():
-    try:
-        with open(POSTED_FILE, "w", encoding="utf-8") as f:
-            json.dump({ch: list(links) for ch, links in posted_links.items()},
-                      f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde: {e}")
+events_posted = set(load(FILES["events"], []))
 
-posted_links = load_posted_links()
+async def send(text):
+    for ch in CHANNELS:
+        await bot.send_photo(
+            chat_id=ch,
+            photo=DEFAULT_IMAGE,
+            caption=text,
+            parse_mode="Markdown"
+        )
+        await asyncio.sleep(2)
 
-# ---------------- UTILITAIRES ----------------
-def clean_text(text, max_len=1000):
-    """Nettoie le texte pour Telegram et coupe s'il est trop long"""
-    if not text:
-        return ""
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    if len(text) > max_len:
-        text = text[:max_len] + "..."
-    return text
+# ================= API CALL =================
+async def sportmonks_get(session, endpoint, params=None):
+    if params is None:
+        params = {}
+    params["api_token"] = SPORTMONKS_TOKEN
+    async with session.get(f"{BASE_URL}/{endpoint}", params=params) as r:
+        if r.status != 200:
+            txt = await r.text()
+            logger.error(f"SportMonks API {r.status}: {txt}")
+            return {}
+        return await r.json()
 
-def escape_html(text: str) -> str:
-    return html_escape(text)
+# ================= STARTUP =================
+async def startup():
+    if not os.path.exists(FILES["startup"]):
+        await send(
+            "👋 *Bot Football ACTIF (SportMonks)*\n\n"
+            "⚽ Matchs du jour\n"
+            "🔴 Score Live\n"
+            "⏱️ Mi‑temps & Scores\n\n"
+            "🔥 Bon match à tous !"
+        )
+        save(FILES["startup"], {"ok": True})
 
-# ---------------- TRADUCTION ----------------
-def translate_text(text: str) -> str:
-    try:
-        return DeeplTranslator(source='en', target='fr').translate(text)
-    except Exception as e:
-        logger.error(f"❌ Erreur traduction : {e}")
-        return text
+# ================= MATCHS DU JOUR =================
+async def post_today(session):
+    today_str = date.today().isoformat()
+    state = load(FILES["today"], {})
+    if state.get("date") == today_str:
+        return
 
-# ---------------- ANALYSE CATEGORIE ----------------
-def analyze_content(title, summary):
-    text = f"{title} {summary}".lower()
-    if any(word in text for word in ["match", "score", "victoire", "défaite"]):
-        return 'match'
-    if any(word in text for word in ["transfert", "signature", "contrat"]):
-        return 'transfert'
-    if any(word in text for word in ["résultat", "score"]):
-        return 'résultat'
-    return 'general'
+    data = await sportmonks_get(session, "fixtures", {"date": today_str})
+    matches = data.get("data") or []
 
-# ---------------- GENERATION MESSAGE ----------------
-def generate_enriched_content(title, summary, source):
-    # Assemblage du texte complet et traduction avant résumé
-    full_text = f"{title}\n\n{summary}"
-    translated_text = translate_text(full_text)
+    if not matches:
+        return
 
-    # On sépare traduit en titre et résumé pour Telegram
-    lines = translated_text.split("\n", 1)
-    title_fr = lines[0]
-    summary_fr = lines[1] if len(lines) > 1 else ""
+    lines = [
+        f"⚔️ {m['home_team']['data']['name']} vs {m['away_team']['data']['name']}"
+        for m in matches[:20]
+    ]
 
-    main_cat = analyze_content(title_fr, summary_fr)
-    clean_summary = escape_html(clean_text(summary_fr))
-    clean_title = escape_html(clean_text(title_fr, max_len=80))
-    accroche = random.choice(PHRASES_ACCROCHE.get(main_cat, PHRASES_ACCROCHE['general']))
-    emoji = random.choice(EMOJI_CATEGORIES.get(main_cat, ['📰']))
-    hashtags = ' '.join(HASHTAGS_FR)
-    source_name = escape_html(source or "BBC Sport")
-    heure = datetime.now().strftime('%H:%M')
+    await send(
+        f"📅 *MATCHS DU JOUR ({today_str})*\n\n" +
+        "\n".join(lines)
+    )
+    save(FILES["today"], {"date": today_str})
 
-    message = f"""
-{emoji} <b>{accroche}{clean_title}</b>
+# ================= LIVE + EVENTS =================
+async def live_events(session):
+    data = await sportmonks_get(session, "livescores")
+    matches = data.get("data") or []
 
-<blockquote><i>{clean_summary}</i></blockquote>
+    if not matches:
+        return
 
-📰 <b>Source :</b> <i>{source_name}</i>
-🕐 <b>Publié :</b> <code>{heure}</code>
-📊 <b>Catégorie :</b> <code>{main_cat.upper()}</code>
+    live_lines = []
+    for m in matches:
+        evt_id = m["id"]
+        home = m["home_team"]["data"]["name"]
+        away = m["away_team"]["data"]["name"]
+        score_h = m["scores"]["localteam_score"]
+        score_a = m["scores"]["visitorteam_score"]
+        minute = m.get("time", {}).get("status")
 
-{hashtags}
-""".strip()
+        live_lines.append(f"🔴 {home} {score_h}–{score_a} {away} ({minute})")
 
-    return message
+        # HT → mi‑temps
+        if minute == "HT":
+            key = f"{evt_id}-HT"
+            if key not in events_posted:
+                await send(f"⏸ *MI‑TEMPS*\n\n{home} {score_h}–{score_a} {away}")
+                events_posted.add(key)
 
-# ---------------- EXTRACTION IMAGE ----------------
-def extract_image(entry):
-    if 'media_content' in entry:
-        return entry.media_content[0].get('url')
-    if 'media_thumbnail' in entry:
-        return entry.media_thumbnail[0].get('url')
-    summary = entry.get('summary', '') or entry.get('description', '')
-    soup = BeautifulSoup(summary, 'html.parser')
-    img_tag = soup.find('img')
-    if img_tag and img_tag.get('src'):
-        return img_tag['src']
-    return None
+        # FT → fin de match
+        if minute == "FT":
+            key = f"{evt_id}-FT"
+            if key not in events_posted:
+                await send(f"🏁 *FIN DU MATCH*\n\n{home} {score_h}–{score_a} {away}")
+                events_posted.add(key)
 
-# ---------------- POST SUR TELEGRAM ----------------
-async def post_to_channels(photo_url, message, button_url=None):
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔘 Lire l'article", url=button_url)]]
-    ) if button_url else None
+    if live_lines:
+        await send("🔴 *MATCHS EN COURS*\n\n" + "\n".join(live_lines[:15]))
 
-    for channel in CHANNELS:
-        if button_url in posted_links.get(channel, set()):
-            logger.info(f"⏩ Déjà posté dans {channel}, passage au suivant")
-            continue
-        try:
-            if photo_url:
-                await bot.send_photo(
-                    chat_id=channel,
-                    photo=photo_url,
-                    caption=message,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-            else:
-                await bot.send_message(
-                    chat_id=channel,
-                    text=message,
-                    parse_mode="HTML",
-                    reply_markup=keyboard
-                )
-            posted_links[channel].add(button_url)
-            save_posted_links()
-            logger.info(f"✅ Publié sur {channel}")
-        except TelegramError as e:
-            logger.error(f"❌ Telegram error {channel}: {e}")
-        await asyncio.sleep(random.randint(3, 6))
+    save(FILES["events"], list(events_posted))
 
-# ---------------- SCHEDULER ----------------
-async def rss_scheduler():
-    intervals = [600, 660, 420]  # 10min, 11min, 7min
-    idx = 0
-
+# ================= MAIN LOOP =================
+async def main():
+    await startup()
     async with aiohttp.ClientSession() as session:
         while True:
-            for feed_url in RSS_FEEDS:
-                try:
-                    async with session.get(feed_url) as resp:
-                        content = await resp.text()
-                        feed = feedparser.parse(content)
-
-                        for entry in feed.entries:
-                            link = entry.get('link')
-                            if not link:
-                                continue
-
-                            if all(link in posted_links.get(ch, set()) for ch in CHANNELS):
-                                continue
-
-                            title = entry.get('title', '')
-                            summary = entry.get('summary', '') or entry.get('description', '')
-                            img_url = extract_image(entry)
-                            msg = generate_enriched_content(title, summary, feed.feed.get('title'))
-
-                            await post_to_channels(img_url, msg, button_url=link)
-                            await asyncio.sleep(intervals[idx % len(intervals)])
-                            idx += 1
-
-                except Exception as e:
-                    logger.error(f"❌ Erreur RSS {feed_url}: {e}")
-
-            await asyncio.sleep(300)
-
-# ---------------- MAIN ----------------
-async def main():
-    logger.info("🤖 Bot BBC Football FR démarré")
-    await rss_scheduler()
+            try:
+                await post_today(session)
+                await live_events(session)
+            except Exception as e:
+                logger.error(e)
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    if not BOT_TOKEN or not CHANNELS:
-        logger.error("❌ BOT_TOKEN et CHANNELS requis")
-        exit(1)
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Arrêt propre")
+    asyncio.run(main())

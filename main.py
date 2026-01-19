@@ -10,24 +10,30 @@ from telethon import TelegramClient, events
 from googletrans import Translator
 
 # ---------------- CONFIGURATION ----------------
-API_ID = int(os.getenv("TG_API_ID"))
+API_ID = os.getenv("TG_API_ID")
 API_HASH = os.getenv("TG_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")
+PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS")
 
-PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")  # Canal privé
-PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS").split(",")  # Liste des canaux publics
+# Vérification des variables d'environnement
+if not API_ID or not API_HASH or not BOT_TOKEN or not PRIVATE_CHANNEL or not PUBLIC_CHANNELS:
+    raise ValueError("❌ Vous devez définir TG_API_ID, TG_API_HASH, BOT_TOKEN, PRIVATE_CHANNEL et PUBLIC_CHANNELS")
+
+API_ID = int(API_ID)
+PUBLIC_CHANNELS = [ch.strip() for ch in PUBLIC_CHANNELS.split(",") if ch.strip()]
 
 POSTED_FILE = "posted.json"
 
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# ---------------- INITIALISATIONS ----------------
 translator = Translator()
-
-# ---------------- EMOJIS, ACCROCHES, HASHTAGS ----------------
 EMOJI_CATEGORIES = ['⚽','🏆','🔥','📰']
 PHRASES_ACCROCHE = ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
 HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
@@ -90,9 +96,7 @@ async def handler(event):
     global posted_links
 
     text = event.message.message
-    photo = None
-    if event.message.media:
-        photo = event.message.media
+    photo = event.message.media if event.message.media else None
 
     if not text or text in posted_links:
         return
@@ -100,7 +104,7 @@ async def handler(event):
     posted_links.add(text)
     save_posted(posted_links)
 
-    # Traduction
+    # Traduction et enrichissement
     text_fr = translate_text(text)
     enriched = enrich_message(text_fr)
 
@@ -108,12 +112,12 @@ async def handler(event):
     for ch in PUBLIC_CHANNELS:
         try:
             if photo:
-                await client.send_file(ch.strip(), photo, caption=enriched, parse_mode='html')
+                await client.send_file(ch, photo, caption=enriched, parse_mode='html')
             else:
-                await client.send_message(ch.strip(), enriched, parse_mode='html')
-            logger.info(f"✅ Publié sur {ch.strip()}")
+                await client.send_message(ch, enriched, parse_mode='html')
+            logger.info(f"✅ Publié sur {ch}")
         except Exception as e:
-            logger.error(f"❌ Erreur publication sur {ch.strip()} : {e}")
+            logger.error(f"❌ Erreur publication sur {ch} : {e}")
 
 # ---------------- MAIN ----------------
 async def main():

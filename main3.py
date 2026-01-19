@@ -44,7 +44,7 @@ async def sportmonks_get(endpoint: str, params: dict = None):
     if params is None:
         params = {}
     params["api_token"] = SPORTMONKS_API_TOKEN
-    url = f"https://soccer.sportmonks.com/api/v2.0/{endpoint}"
+    url = f"https://soccer.sportmonks.com/api/v3/football/{endpoint}"
     async with httpx.AsyncClient() as client:
         r = await client.get(url, params=params)
         r.raise_for_status()

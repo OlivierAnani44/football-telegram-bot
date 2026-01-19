@@ -12,7 +12,7 @@ import random
 from datetime import datetime
 from html import escape as html_escape
 import aiohttp
-from deep_translator import DeeplTranslator
+from googletrans import Translator  # Traducteur gratuit Google
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -48,6 +48,7 @@ PHRASES_ACCROCHE = {
 HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
 
 bot = Bot(token=BOT_TOKEN)
+translator = Translator()
 
 # ---------------- GESTION DES LIENS DÉJÀ POSTÉS ----------------
 def load_posted_links():
@@ -84,7 +85,7 @@ def clean_text(text, max_len=500):
 
 def translate_text(text: str) -> str:
     try:
-        return DeeplTranslator(source='en', target='fr').translate(text)
+        return translator.translate(text, src='en', dest='fr').text
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
         return text

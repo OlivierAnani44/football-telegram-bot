@@ -1,108 +1,101 @@
 import os
 import feedparser
 import logging
-from html import unescape
-from deep_translator import GoogleTranslator
-import requests
-from telegram import Bot
+import aiohttp
 import asyncio
-import json
+from telegram import Bot
+from deep_translator import GoogleTranslator, LibreTranslator, DeeplTranslator
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Telegram bot token
-CHANNELS = os.getenv("CHANNELS", "").split(",")  # Canaux séparés par des virgules
-RSS_FEED = "https://feeds.bbci.co.uk/sport/football/rss.xml"  # Exemple RSS
-CHECK_INTERVAL = 300  # Vérifier toutes les 5 minutes
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNELS = [ch.strip() for ch in os.getenv("CHANNELS", "").split(",") if ch.strip()]
 
-POSTED_FILE = "posted.json"  # Pour garder la trace des articles déjà postés
-TEMP_IMAGE_FILE = "image.jpg"
+RSS_FEED = "https://feeds.bbci.co.uk/sport/football/rss.xml"
+TEMP_TEXT_FILE = "/tmp/message.txt"
+TEMP_IMAGE_FILE = "/tmp/image.jpg"
 
-# Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- UTILITAIRES ----------------
-def load_posted():
-    if os.path.exists(POSTED_FILE):
-        with open(POSTED_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
+# ---------------- UTILITIES ----------------
+async def fetch_rss():
+    return feedparser.parse(RSS_FEED)
 
-def save_posted(posted_set):
-    with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted_set), f)
-
-def get_latest_rss_item(rss_url):
-    feed = feedparser.parse(rss_url)
-    if feed.entries:
-        entry = feed.entries[0]
-        title = unescape(entry.get('title', ''))
-        summary = unescape(entry.get('summary', ''))
-        link = entry.get('link', '')
-        media = entry.get('media_content', [])
-        image_url = media[0]['url'] if media else None
-        return title, summary, link, image_url
-    return None, None, None, None
-
-def translate_text(text):
+async def download_image(url):
     try:
-        return GoogleTranslator(source='en', target='fr').translate(text)
-    except Exception as e:
-        logger.error(f"❌ Erreur traduction : {e}")
-        return text
-
-def download_image(url, filename):
-    if not url:
-        return False
-    try:
-        r = requests.get(url)
-        if r.status_code == 200:
-            with open(filename, "wb") as f:
-                f.write(r.content)
-            return True
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    with open(TEMP_IMAGE_FILE, "wb") as f:
+                        f.write(await resp.read())
+                    return TEMP_IMAGE_FILE
     except Exception as e:
         logger.error(f"❌ Erreur téléchargement image : {e}")
-    return False
+    return None
 
-def publish_telegram(text, image_path=None):
+async def translate_text(text):
+    translators = [
+        ("Google", GoogleTranslator(source='auto', target='fr')),
+        ("Libre", LibreTranslator(source='auto', target='fr')),
+        # ("DeepL", DeeplTranslator(source='auto', target='fr')), # Décommenter si clé DeepL
+    ]
+    for name, translator in translators:
+        try:
+            translated = translator.translate(text)
+            logger.info(f"✅ {name} Translator réussi")
+            return translated
+        except Exception as e:
+            logger.error(f"❌ {name} Translator erreur : {e}")
+    # fallback : texte original
+    return text
+
+async def publish_telegram(text, image_path=None):
     for ch in CHANNELS:
         try:
             if image_path and os.path.exists(image_path):
                 with open(image_path, "rb") as img:
-                    bot.send_photo(chat_id=ch, photo=img, caption=text)
+                    await bot.send_photo(chat_id=ch, photo=img, caption=text)
             else:
-                bot.send_message(chat_id=ch, text=text, parse_mode="HTML")
+                await bot.send_message(chat_id=ch, text=text, parse_mode="HTML")
             logger.info(f"✅ Publié sur {ch}")
         except Exception as e:
             logger.error(f"❌ Erreur publication sur {ch} : {e}")
 
 # ---------------- MAIN LOOP ----------------
 async def main():
-    posted_articles = load_posted()
-    while True:
-        title, summary, link, image_url = get_latest_rss_item(RSS_FEED)
-        if title and link not in posted_articles:
-            full_text = f"{title}\n\n{summary}\n\n{link}"
-            logger.info(f"Texte original : {full_text}")
-
-            translated_text = translate_text(full_text)
-            logger.info(f"Texte traduit : {translated_text}")
-
-            # Télécharger image si disponible
-            image_exists = download_image(image_url, TEMP_IMAGE_FILE)
-
-            # Publier sur Telegram
-            publish_telegram(translated_text, TEMP_IMAGE_FILE if image_exists else None)
-
-            # Marquer comme posté
-            posted_articles.add(link)
-            save_posted(posted_articles)
-        else:
-            logger.info("✅ Aucun nouvel article à poster")
-
-        await asyncio.sleep(CHECK_INTERVAL)
+    logger.info("🤖 Bot Telegram RSS -> Public démarré")
+    
+    feed = await fetch_rss()
+    if not feed.entries:
+        logger.warning("❌ Aucun article trouvé")
+        return
+    
+    for entry in feed.entries[:5]:  # prend les 5 derniers
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+        link = entry.get("link", "")
+        text = f"{title}\n{summary}\n{link}"
+        
+        # Enregistre temporairement
+        with open(TEMP_TEXT_FILE, "w", encoding="utf-8") as f:
+            f.write(text)
+        
+        # Télécharge l'image si présente
+        image_url = entry.get("media_content", [{}])[0].get("url")
+        image_path = await download_image(image_url) if image_url else None
+        
+        # Traduction
+        translated_text = await translate_text(text)
+        logger.info(f"Texte traduit : {translated_text}")
+        
+        # Publication
+        await publish_telegram(translated_text, image_path)
+        await asyncio.sleep(5)  # petit délai pour éviter le spam
 
 if __name__ == "__main__":
     asyncio.run(main())

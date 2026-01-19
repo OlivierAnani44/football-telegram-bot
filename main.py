@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-import json
-import re
+import sqlite3
 import asyncio
 import logging
 from datetime import datetime
@@ -13,7 +12,6 @@ from googletrans import Translator
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")
 PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS")
 
 # Vérification des variables d'environnement
@@ -21,20 +19,14 @@ missing = []
 if not API_ID: missing.append("API_ID")
 if not API_HASH: missing.append("API_HASH")
 if not BOT_TOKEN: missing.append("BOT_TOKEN")
-if not PRIVATE_CHANNEL: missing.append("PRIVATE_CHANNEL")
 if not PUBLIC_CHANNELS: missing.append("PUBLIC_CHANNELS")
 if missing:
     raise ValueError(f"❌ Les variables suivantes sont manquantes : {', '.join(missing)}")
 
-# Conversion API_ID en entier et split des canaux publics
-try:
-    API_ID = int(API_ID)
-except ValueError:
-    raise ValueError("❌ API_ID doit être un nombre entier valide")
-
+API_ID = int(API_ID)
 PUBLIC_CHANNELS = [ch.strip() for ch in PUBLIC_CHANNELS.split(",") if ch.strip()]
 
-POSTED_FILE = "posted.json"
+DB_FILE = "messages.db"
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
@@ -49,23 +41,42 @@ EMOJI_CATEGORIES = ['⚽','🏆','🔥','📰']
 PHRASES_ACCROCHE = ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
 HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
 
-# ---------------- GESTION DES MESSAGES DÉJÀ PUBLIÉS ----------------
-def load_posted():
-    if os.path.exists(POSTED_FILE):
-        with open(POSTED_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    return set()
+# ---------------- SQLITE ----------------
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text_en TEXT NOT NULL,
+            image_url TEXT,
+            posted INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-def save_posted(posted):
-    with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(posted), f, ensure_ascii=False, indent=2)
+def get_unposted_messages():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, text_en, image_url FROM messages WHERE posted=0 ORDER BY created_at ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
-posted_links = load_posted()
+def mark_posted(msg_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE messages SET posted=1 WHERE id=?", (msg_id,))
+    conn.commit()
+    conn.close()
 
 # ---------------- UTILITAIRES ----------------
 def clean_text(text, max_len=500):
     if not text:
         return ""
+    import re
     text = re.sub(r'<[^>]+>','',text)
     text = re.sub(r'https?://\S+','',text)
     text = re.sub(r'\s+',' ',text).strip()
@@ -76,15 +87,13 @@ def clean_text(text, max_len=500):
 def translate_text(text):
     try:
         text_str = "" if text is None else str(text)
-        text_str = re.sub(r'<[^>]+>','',text_str)
-        text_str = re.sub(r'https?://\S+','',text_str)
-        text_str = re.sub(r'\s+',' ',text_str).strip()
+        text_str = clean_text(text_str)
         if not text_str:
             return ""
         return translator.translate(text_str, src='en', dest='fr').text
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
-        return text_str
+        return text
 
 def enrich_message(text):
     emoji = EMOJI_CATEGORIES[0]
@@ -99,41 +108,42 @@ def enrich_message(text):
 {hashtags}"""
     return message
 
-# ---------------- TELETHON CLIENT ----------------
+# ---------------- TELEGRAM CLIENT ----------------
 client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-@client.on(events.NewMessage(chats=PRIVATE_CHANNEL))
-async def handler(event):
-    global posted_links
+async def check_and_post():
+    while True:
+        messages = get_unposted_messages()
+        if not messages:
+            await asyncio.sleep(30)  # attendre 30s si rien de nouveau
+            continue
 
-    text = event.message.message
-    photo = event.message.media if event.message.media else None
+        for msg_id, text_en, image_url in messages:
+            # Traduction et enrichissement
+            text_fr = translate_text(text_en)
+            enriched = enrich_message(text_fr)
 
-    if not text or text in posted_links:
-        return
+            # Publication sur les canaux publics
+            for ch in PUBLIC_CHANNELS:
+                try:
+                    if image_url:
+                        await client.send_file(ch, image_url, caption=enriched, parse_mode='html')
+                    else:
+                        await client.send_message(ch, enriched, parse_mode='html')
+                    logger.info(f"✅ Publié sur {ch}")
+                except Exception as e:
+                    logger.error(f"❌ Erreur publication sur {ch} : {e}")
 
-    posted_links.add(text)
-    save_posted(posted_links)
+            mark_posted(msg_id)
+            await asyncio.sleep(5)  # éviter flood
 
-    # Traduction et enrichissement
-    text_fr = translate_text(text)
-    enriched = enrich_message(text_fr)
-
-    # Publication sur les canaux publics
-    for ch in PUBLIC_CHANNELS:
-        try:
-            if photo:
-                await client.send_file(ch, photo, caption=enriched, parse_mode='html')
-            else:
-                await client.send_message(ch, enriched, parse_mode='html')
-            logger.info(f"✅ Publié sur {ch}")
-        except Exception as e:
-            logger.error(f"❌ Erreur publication sur {ch} : {e}")
+        await asyncio.sleep(10)  # pause avant la prochaine vérification
 
 # ---------------- MAIN ----------------
 async def main():
-    logger.info("🤖 Bot privé -> public démarré")
-    await client.run_until_disconnected()
+    init_db()
+    logger.info("🤖 Bot base SQLite démarré")
+    await check_and_post()
 
 if __name__ == "__main__":
     try:

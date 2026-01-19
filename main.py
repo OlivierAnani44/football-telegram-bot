@@ -10,8 +10,8 @@ from telethon import TelegramClient, events
 from googletrans import Translator
 
 # ---------------- CONFIGURATION ----------------
-API_ID = os.getenv("TG_API_ID")
-API_HASH = os.getenv("TG_API_HASH")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")
 PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS")

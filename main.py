@@ -12,7 +12,7 @@ import random
 from datetime import datetime
 from html import escape as html_escape
 import aiohttp
-from googletrans import Translator  # Traducteur gratuit Google
+from googletrans import Translator  # Traduction gratuite Google
 
 # ---------------- CONFIGURATION ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -33,6 +33,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+bot = Bot(token=BOT_TOKEN)
+translator = Translator()
+
 # ---------------- EMOJIS, ACCROCHES, HASHTAGS ----------------
 EMOJI_CATEGORIES = {
     'match': ['⚽', '🏆', '🔥', '🎯'],
@@ -46,9 +49,6 @@ PHRASES_ACCROCHE = {
 }
 
 HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
-
-bot = Bot(token=BOT_TOKEN)
-translator = Translator()
 
 # ---------------- GESTION DES LIENS DÉJÀ POSTÉS ----------------
 def load_posted_links():
@@ -83,12 +83,22 @@ def clean_text(text, max_len=500):
         text = text[:max_len] + "..."
     return text
 
+def clean_for_translation(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def translate_text(text: str) -> str:
     try:
-        return translator.translate(text, src='en', dest='fr').text
+        if not text:
+            return ""
+        return translator.translate(str(text), src='en', dest='fr').text
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
-        return text
+        return str(text)
 
 def analyze_content(title, summary):
     text = f"{title} {summary}".lower()
@@ -101,8 +111,8 @@ def analyze_content(title, summary):
     return 'general'
 
 def generate_enriched_content(title, summary, source):
-    title_fr = translate_text(title)
-    summary_fr = translate_text(summary)
+    title_fr = translate_text(clean_for_translation(title))
+    summary_fr = translate_text(clean_for_translation(summary))
     main_cat = analyze_content(title_fr, summary_fr)
     clean_summary = html_escape(clean_text(summary_fr))
     clean_title = html_escape(clean_text(title_fr, max_len=80))

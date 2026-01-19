@@ -7,16 +7,15 @@ import logging
 from datetime import datetime
 from html import escape as html_escape
 from telethon import TelegramClient, events
-from telethon.tl.types import PeerChannel
 from googletrans import Translator
 
 # ---------------- CONFIGURATION ----------------
-API_ID = int(os.getenv("TG_API_ID"))  # Depuis my.telegram.org
+API_ID = int(os.getenv("TG_API_ID"))
 API_HASH = os.getenv("TG_API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")  # @canal_prive
-PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS").split(",")  # liste des canaux publics
+PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")  # Canal privé
+PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS").split(",")  # Liste des canaux publics
 
 POSTED_FILE = "posted.json"
 
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 translator = Translator()
 
-# ---------------- EMOJIS ET HASHTAGS ----------------
+# ---------------- EMOJIS, ACCROCHES, HASHTAGS ----------------
 EMOJI_CATEGORIES = ['⚽','🏆','🔥','📰']
 PHRASES_ACCROCHE = ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
 HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
@@ -50,19 +49,19 @@ posted_links = load_posted()
 def clean_text(text, max_len=500):
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'<[^>]+>','',text)
+    text = re.sub(r'https?://\S+','',text)
+    text = re.sub(r'\s+',' ',text).strip()
     if len(text) > max_len:
-        text = text[:max_len] + "..."
+        text = text[:max_len]+"..."
     return text
 
 def translate_text(text):
     try:
         text_str = "" if text is None else str(text)
-        text_str = re.sub(r'<[^>]+>', '', text_str)
-        text_str = re.sub(r'https?://\S+', '', text_str)
-        text_str = re.sub(r'\s+', ' ', text_str).strip()
+        text_str = re.sub(r'<[^>]+>','',text_str)
+        text_str = re.sub(r'https?://\S+','',text_str)
+        text_str = re.sub(r'\s+',' ',text_str).strip()
         if not text_str:
             return ""
         return translator.translate(text_str, src='en', dest='fr').text
@@ -89,7 +88,12 @@ client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOK
 @client.on(events.NewMessage(chats=PRIVATE_CHANNEL))
 async def handler(event):
     global posted_links
+
     text = event.message.message
+    photo = None
+    if event.message.media:
+        photo = event.message.media
+
     if not text or text in posted_links:
         return
 
@@ -103,7 +107,10 @@ async def handler(event):
     # Publication sur les canaux publics
     for ch in PUBLIC_CHANNELS:
         try:
-            await client.send_message(ch.strip(), enriched, parse_mode='html')
+            if photo:
+                await client.send_file(ch.strip(), photo, caption=enriched, parse_mode='html')
+            else:
+                await client.send_message(ch.strip(), enriched, parse_mode='html')
             logger.info(f"✅ Publié sur {ch.strip()}")
         except Exception as e:
             logger.error(f"❌ Erreur publication sur {ch.strip()} : {e}")

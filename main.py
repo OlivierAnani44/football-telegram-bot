@@ -1,159 +1,155 @@
 import os
 import feedparser
-import sqlite3
-import logging
 import asyncio
+import logging
+import aiohttp
 import random
 from datetime import datetime
 from html import escape as html_escape
+from bs4 import BeautifulSoup
 from googletrans import Translator
 from telegram import Bot
 from telegram.constants import ParseMode
 
-# ---------------- CONFIG ----------------
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS", "")
-PUBLIC_CHANNELS = [ch.strip() for ch in PUBLIC_CHANNELS.split(",") if ch.strip()]
+CHANNELS = os.getenv("PUBLIC_CHANNELS", "")
+CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
 
 RSS_FEEDS = ["https://feeds.bbci.co.uk/sport/football/rss.xml"]
-DB_FILE = "messages.db"
 
-# ---------------- LOGGING ----------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+POSTED_FILE = "posted.txt"
+IMAGE_DIR = "images"
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+# ================= LOG =================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------------- SQLITE ----------------
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text_en TEXT NOT NULL,
-            image_url TEXT,
-            posted INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def store_rss_to_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    for feed_url in RSS_FEEDS:
-        feed = feedparser.parse(feed_url)
-        for entry in feed.entries:
-            link = entry.get("link")
-            title = entry.get("title", "")
-            summary = entry.get("summary", "") or entry.get("description", "")
-            text_en = f"{title}\n{summary}\n{link}"
-
-            # Vérifie si déjà stocké
-            c.execute("SELECT 1 FROM messages WHERE text_en LIKE ?", (f"%{link}%",))
-            if c.fetchone():
-                continue
-
-            c.execute("INSERT INTO messages (text_en, image_url) VALUES (?, ?)", (text_en, None))
-    
-    conn.commit()
-    conn.close()
-
-def get_unposted_messages():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id, text_en, image_url FROM messages WHERE posted=0 ORDER BY created_at ASC")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def mark_posted(msg_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE messages SET posted=1 WHERE id=?", (msg_id,))
-    conn.commit()
-    conn.close()
-
-# ---------------- UTILITAIRES ----------------
+# ================= TELEGRAM =================
+bot = Bot(token=BOT_TOKEN)
 translator = Translator()
-EMOJI_CATEGORIES = ['⚽','🏆','🔥','📰']
-PHRASES_ACCROCHE = ["📰 INFO FOOT : ", "⚡ ACTU FOOT : ", "🔥 NOUVELLE FOOT : "]
-HASHTAGS_FR = ["#Football", "#Foot", "#PremierLeague", "#Ligue1", "#SerieA"]
 
-def clean_text(text, max_len=500):
+# ================= STYLE =================
+EMOJIS = ["⚽", "🔥", "🏆", "📰"]
+ACCROCHES = ["INFO FOOT :", "ACTU FOOT :", "BREAKING FOOT :"]
+HASHTAGS = "#Football #Foot #BBCSport"
+
+# ================= UTILS =================
+def load_posted():
+    if not os.path.exists(POSTED_FILE):
+        return set()
+    with open(POSTED_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
+
+def save_posted(link):
+    with open(POSTED_FILE, "a", encoding="utf-8") as f:
+        f.write(link + "\n")
+
+def clean_text(text, max_len=700):
     import re
-    if not text:
-        return ""
-    text = re.sub(r'<[^>]+>','',text)
-    text = re.sub(r'https?://\S+','',text)
-    text = re.sub(r'\s+',' ',text).strip()
-    return text[:max_len]+"..." if len(text) > max_len else text
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len] + "..." if len(text) > max_len else text
 
-def translate_text_safe(text):
+def translate_safe(text):
     try:
-        result = translator.translate(clean_text(text), src='en', dest='fr')
+        result = translator.translate(text, src="en", dest="fr")
         return result.text if result else text
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
         return text
 
-def enrich_message(text):
-    emoji = random.choice(EMOJI_CATEGORIES)
-    accroche = random.choice(PHRASES_ACCROCHE)
-    hashtags = " ".join(HASHTAGS_FR)
-    heure = datetime.now().strftime('%H:%M')
-    clean = html_escape(clean_text(text))
-    message = f"""{emoji} <b>{accroche}{clean}</b>
+def extract_image(entry):
+    if "media_content" in entry:
+        return entry.media_content[0].get("url")
+    if "media_thumbnail" in entry:
+        return entry.media_thumbnail[0].get("url")
 
-🕐 <b>Publié :</b> <code>{heure}</code>
+    soup = BeautifulSoup(entry.get("summary", ""), "html.parser")
+    img = soup.find("img")
+    return img["src"] if img else None
 
-{hashtags}"""
-    return message
-
-# ---------------- TELEGRAM ----------------
-bot = Bot(token=BOT_TOKEN)
-
-async def send_to_channel(chat_id, text, image_url=None):
+async def download_image(url, filename):
     try:
-        if image_url:
-            await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
-        else:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
-        logger.info(f"✅ Publié sur {chat_id}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as r:
+                if r.status == 200:
+                    path = os.path.join(IMAGE_DIR, filename)
+                    with open(path, "wb") as f:
+                        f.write(await r.read())
+                    return path
     except Exception as e:
-        logger.error(f"❌ Erreur publication sur {chat_id} : {e}")
+        logger.error(f"❌ Erreur téléchargement image : {e}")
+    return None
 
-# ---------------- LOOP ----------------
-async def check_and_post():
-    messages = get_unposted_messages()
-    if not messages:
-        return
+def build_message(text_fr):
+    emoji = random.choice(EMOJIS)
+    accroche = random.choice(ACCROCHES)
+    heure = datetime.now().strftime("%H:%M")
 
-    for msg_id, text_en, image_url in messages:
-        text_fr = translate_text_safe(text_en)
-        enriched = enrich_message(text_fr)
+    return f"""{emoji} <b>{accroche}</b>
 
-        for ch in PUBLIC_CHANNELS:
-            await send_to_channel(ch, enriched, image_url)
+{html_escape(text_fr)}
 
-        mark_posted(msg_id)
-        await asyncio.sleep(3)
+🕐 <code>{heure}</code>
+{HASHTAGS}
+"""
 
-async def scheduler():
-    while True:
-        store_rss_to_db()
-        await check_and_post()
-        await asyncio.sleep(300)  # toutes les 5 minutes
+# ================= MAIN LOGIC =================
+async def process_rss():
+    posted = load_posted()
 
-# ---------------- MAIN ----------------
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+
+        for entry in feed.entries:
+            link = entry.get("link")
+            if not link or link in posted:
+                continue
+
+            title = entry.get("title", "")
+            summary = entry.get("summary", "")
+            image_url = extract_image(entry)
+
+            text_en = clean_text(f"{title}\n\n{summary}")
+            text_fr = translate_safe(text_en)
+            message = build_message(text_fr)
+
+            image_path = None
+            if image_url:
+                image_name = link.split("/")[-1].replace("?", "") + ".jpg"
+                image_path = await download_image(image_url, image_name)
+
+            for ch in CHANNELS:
+                try:
+                    if image_path:
+                        with open(image_path, "rb") as img:
+                            await bot.send_photo(
+                                chat_id=ch,
+                                photo=img,
+                                caption=message,
+                                parse_mode=ParseMode.HTML
+                            )
+                    else:
+                        await bot.send_message(
+                            chat_id=ch,
+                            text=message,
+                            parse_mode=ParseMode.HTML
+                        )
+                    logger.info(f"✅ Publié sur {ch}")
+                except Exception as e:
+                    logger.error(f"❌ Telegram erreur {ch} : {e}")
+
+            save_posted(link)
+            await asyncio.sleep(5)
+
+# ================= LOOP =================
 async def main():
-    init_db()
-    logger.info("🤖 Bot Telegram RSS -> Public démarré")
-    await scheduler()
+    logger.info("🤖 Bot RSS → Texte → Traduction → Image → Telegram démarré")
+    while True:
+        await process_rss()
+        await asyncio.sleep(300)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Arrêt propre")
+    asyncio.run(main())

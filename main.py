@@ -17,10 +17,21 @@ PRIVATE_CHANNEL = os.getenv("PRIVATE_CHANNEL")
 PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS")
 
 # Vérification des variables d'environnement
-if not API_ID or not API_HASH or not BOT_TOKEN or not PRIVATE_CHANNEL or not PUBLIC_CHANNELS:
-    raise ValueError("❌ Vous devez définir TG_API_ID, TG_API_HASH, BOT_TOKEN, PRIVATE_CHANNEL et PUBLIC_CHANNELS")
+missing = []
+if not API_ID: missing.append("API_ID")
+if not API_HASH: missing.append("API_HASH")
+if not BOT_TOKEN: missing.append("BOT_TOKEN")
+if not PRIVATE_CHANNEL: missing.append("PRIVATE_CHANNEL")
+if not PUBLIC_CHANNELS: missing.append("PUBLIC_CHANNELS")
+if missing:
+    raise ValueError(f"❌ Les variables suivantes sont manquantes : {', '.join(missing)}")
 
-API_ID = int(API_ID)
+# Conversion API_ID en entier et split des canaux publics
+try:
+    API_ID = int(API_ID)
+except ValueError:
+    raise ValueError("❌ API_ID doit être un nombre entier valide")
+
 PUBLIC_CHANNELS = [ch.strip() for ch in PUBLIC_CHANNELS.split(",") if ch.strip()]
 
 POSTED_FILE = "posted.json"

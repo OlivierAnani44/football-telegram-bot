@@ -1,201 +1,171 @@
 import os
-import feedparser
-import json
-import asyncio
-import logging
 import re
+import json
 import random
-import uuid
-from datetime import datetime
-
+import feedparser
+import logging
 import aiohttp
+import asyncio
 from telegram import Bot
-from bs4 import BeautifulSoup
+from deep_translator import GoogleTranslator
 
-# ================= CONFIG =================
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNELS = os.getenv("CHANNELS", "")
-CHANNELS = [c.strip() for c in CHANNELS.split(",") if c.strip()]
-
-RSS_FEED = "https://fr.cointelegraph.com/rss"
+CHANNELS = [ch.strip() for ch in os.getenv("CHANNELS", "").split(",") if ch.strip()]
+RSS_FEED = "https://cointelegraph.com/rss"  # RSS Cointelegraph crypto/blockchain
+TEMP_IMAGE_FILE = "/tmp/image.jpg"
 POSTED_FILE = "posted.json"
-IMAGE_DIR = "images"
+POST_INTERVAL = 30 * 60  # 30 minutes
 
-MIN_DELAY = 300
-MAX_POSTED = 3000
-
-os.makedirs(IMAGE_DIR, exist_ok=True)
-
-# ================= LOG =================
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("CT_BOT")
-
+logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 
-# ================= STYLE =================
-ACCROCHES = [
-    "🚀 <b>BREAKING CRYPTO</b>",
-    "📊 <b>MARCHÉ CRYPTO</b>",
-    "🔥 <b>ACTU BLOCKCHAIN</b>"
+# ---------------- VARIANTES ----------------
+TITLE_VARIANTS = [
+    "NOUVELLE CRYPTO", "INFO BLOCKCHAIN", "ACTUALITÉ CRYPTO", "FLASH CRYPTO",
+    "DERNIÈRE MINUTE CRYPTO", "ACTU BITCOIN", "CRYPTO À LA UNE", "LE POINT BLOCKCHAIN",
+    "INFO NFT", "RÉSUMÉ CRYPTO", "CRYPTO AUJOURD’HUI", "ACTU DEFI"
 ]
 
-HASHTAGS = ["#Crypto", "#Bitcoin", "#Ethereum", "#Blockchain", "#Web3"]
-
-COMMENTS = [
-    "💬 <i>Ton avis ?</i>",
-    "📊 <i>Bullish ou bearish ?</i>",
-    "🔥 <i>Impact réel selon toi ?</i>",
+HASHTAG_VARIANTS = [
+    "#Crypto", "#Blockchain", "#Bitcoin", "#Ethereum", "#Altcoins", "#NFT",
+    "#DeFi", "#CryptoNews", "#CryptoFR", "#CryptoActu", "#BTC", "#ETH",
+    "#InvestissementCrypto", "#Web3", "#Token", "#MonnaieNumérique"
 ]
 
-POPULAR_KEYWORDS = [
-    "bitcoin", "btc", "ethereum", "eth",
-    "etf", "sec", "regulation", "adoption",
-    "crash", "hack", "institutional"
+COMMENT_VARIANTS = [
+    "💬 Qu’en pensez-vous ?", "🗣️ Donnez votre avis en commentaire", "👇 Votre réaction nous intéresse",
+    "⚡ Dites-nous ce que vous en pensez", "🔥 Êtes-vous d’accord avec cette info ?", "📢 Débattons-en dans les commentaires",
+    "🤔 Bonne ou mauvaise nouvelle selon vous ?", "💭 Votre analyse en commentaire", "📝 Partagez votre opinion",
+    "🙌 On attend vos réactions", "👀 Votre point de vue compte", "📣 Laissez votre avis"
 ]
 
-# ================= STORAGE =================
+# ---------------- JSON POSTÉS ----------------
 def load_posted():
     if os.path.exists(POSTED_FILE):
         with open(POSTED_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {k: set(v) for k, v in data.items()}
-    return {ch: set() for ch in CHANNELS}
+            return set(json.load(f))
+    return set()
 
-def save_posted():
+def save_posted(posted):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(
-            {ch: list(v)[-MAX_POSTED:] for ch, v in posted_links.items()},
-            f,
-            indent=2
-        )
+        json.dump(list(posted), f, ensure_ascii=False, indent=2)
 
-posted_links = load_posted()
-
-# ================= TEXT =================
-def clean_text(text, max_len=600):
-    text = BeautifulSoup(text or "", "html.parser").get_text()
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text[:max_len] + "..." if len(text) > max_len else text
-
-def highlight_keywords(text):
-    for kw in POPULAR_KEYWORDS:
-        text = re.sub(
-            rf"\b({kw})\b",
-            r"<b>\1</b>",
-            text,
-            flags=re.IGNORECASE
-        )
-    return text
-
-# ================= IMAGE =================
+# ---------------- IMAGE ----------------
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
     if "media_thumbnail" in entry:
         return entry.media_thumbnail[0].get("url")
+    html = entry.get("summary", "")
+    match = re.search(r'<img[^>]+src="([^">]+)"', html)
+    return match.group(1) if match else None
+
+async def download_image(url):
+    if not url:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    with open(TEMP_IMAGE_FILE, "wb") as f:
+                        f.write(await resp.read())
+                    return TEMP_IMAGE_FILE
+    except Exception as e:
+        logger.error(f"❌ Image error : {e}")
     return None
 
-async def download_crypto_image():
-    url = "https://source.unsplash.com/1200x675/?crypto,bitcoin"
-    filename = f"{IMAGE_DIR}/{uuid.uuid4().hex}.jpg"
+# ---------------- TRANSLATION ----------------
+async def translate(text):
+    try:
+        return GoogleTranslator(source="auto", target="fr").translate(text)
+    except Exception:
+        return text
 
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url) as r:
-            if r.status == 200:
-                with open(filename, "wb") as f:
-                    f.write(await r.read())
-                return filename
-    return None
+# ---------------- FORMAT MESSAGE ----------------
+def format_message(title, summary):
+    header = random.choice(TITLE_VARIANTS)
+    hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
+    comment = random.choice(COMMENT_VARIANTS)
+    return f"""🔥🔥 <b>{header} :</b> <i>{title}</i>
+<blockquote>{summary}</blockquote>
+{hashtags} <b>{comment}</b>""".strip()
 
-# ================= MESSAGE =================
-def build_message(title, summary):
-    accroche = random.choice(ACCROCHES)
-    hashtags = " ".join(random.sample(HASHTAGS, 3))
+# ---------------- TRI INTELLIGENT ----------------
+def compute_importance(entry):
+    summary = re.sub("<.*?>", "", entry.get("summary", "")).lower()
+    title = entry.get("title", "").lower()
+    keywords_priority = {
+        "bitcoin": 10, "btc": 8, "ethereum": 9, "eth": 8, "altcoin": 7,
+        "blockchain": 6, "nft": 8, "defi": 8, "token": 7, "crypto": 9,
+        "investissement": 6, "lancement": 7, "partenariat": 5, "sécurité": 8
+    }
+    score = len(summary.split())
+    for kw, val in keywords_priority.items():
+        if kw in summary or kw in title:
+            score += val
+    return score
 
-    title = highlight_keywords(clean_text(title, 100))
-    summary = highlight_keywords(clean_text(summary))
+def select_most_important(entries, posted):
+    candidates = [e for e in entries if (e.get("id") or e.get("link") or e.get("title")) not in posted]
+    if not candidates:
+        return None
+    candidates.sort(key=compute_importance, reverse=True)
+    return candidates[0]
 
-    return f"""
-{accroche}
+# ---------------- POST ----------------
+async def post_entry(entry, posted):
+    title = await translate(entry.get("title", ""))
+    summary = await translate(re.sub("<.*?>", "", entry.get("summary", "")))
+    entry_id = entry.get("id") or entry.get("link") or title
+    if entry_id in posted:
+        return False
+    image_url = extract_image(entry)
+    image_path = await download_image(image_url)
+    message = format_message(title, summary)
+    for ch in CHANNELS:
+        try:
+            if image_path:
+                with open(image_path, "rb") as img:
+                    await bot.send_photo(
+                        chat_id=ch,
+                        photo=img,
+                        caption=message[:1024],
+                        parse_mode="HTML"
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=ch,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+            logger.info(f"✅ Publié sur {ch} : {title}")
+        except Exception as e:
+            logger.error(f"❌ Telegram error : {e}")
+    posted.add(entry_id)
+    save_posted(posted)
+    return True
 
-<b>{title}</b>
-
-<blockquote>
-<i>{summary}</i>
-</blockquote>
-
-⏰ <i>{datetime.now().strftime('%H:%M')}</i>
-
-{hashtags}
-"""
-
-# ================= POST =================
-async def post(channel, photo, message):
-    if photo and photo.startswith("http"):
-        sent = await bot.send_photo(channel, photo, caption=message, parse_mode="HTML")
-    elif photo:
-        with open(photo, "rb") as f:
-            sent = await bot.send_photo(channel, f, caption=message, parse_mode="HTML")
-    else:
-        sent = await bot.send_message(channel, message, parse_mode="HTML")
-
-    await bot.send_message(
-        channel,
-        random.choice(COMMENTS),
-        reply_to_message_id=sent.message_id,
-        parse_mode="HTML"
-    )
-
-# ================= LOOP =================
-async def rss_loop():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(RSS_FEED, timeout=20) as r:
-                    feed = feedparser.parse(await r.text())
-
-                    for entry in feed.entries:
-                        uid = entry.get("id") or entry.get("link")
-                        if not uid:
-                            continue
-
-                        title = entry.get("title", "")
-                        summary = entry.get("summary", "")
-                        img = extract_image(entry)
-
-                        for ch in CHANNELS:
-                            if uid in posted_links[ch]:
-                                continue
-
-                            temp = None
-                            if not img:
-                                temp = await download_crypto_image()
-
-                            await post(ch, img or temp, build_message(title, summary))
-                            posted_links[ch].add(uid)
-                            save_posted()
-                            logger.info(f"✅ Publié sur {ch}")
-
-                            if temp and os.path.exists(temp):
-                                os.remove(temp)
-
-                            await asyncio.sleep(2)
-
-                        await asyncio.sleep(MIN_DELAY)
-
-            except Exception as e:
-                logger.error(f"❌ Erreur RSS : {e}")
-
-            await asyncio.sleep(60)
-
-# ================= MAIN =================
-async def main():
-    logger.info("🤖 Bot Cointelegraph lancé")
-    await rss_loop()
+# ---------------- MAIN LOOP ----------------
+async def main_loop():
+    posted = load_posted()
+    logger.info("🤖 Bot crypto lancé et va poster un seul post toutes les 30 minutes")
+    while True:
+        feed = feedparser.parse(RSS_FEED)
+        entries = feed.entries[:30]
+        post_to_send = select_most_important(entries, posted)
+        if post_to_send:
+            await post_entry(post_to_send, posted)
+        else:
+            logger.info("⚠️ Aucun nouveau post à publier")
+        logger.info(f"⏳ Attente de {POST_INTERVAL//60} minutes avant le prochain post")
+        await asyncio.sleep(POST_INTERVAL)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_loop())

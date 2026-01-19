@@ -1,17 +1,20 @@
 import os
+import feedparser
 import sqlite3
 import logging
 import asyncio
+import random
 from datetime import datetime
 from html import escape as html_escape
 from googletrans import Translator
-from telegram import Bot, InputMediaPhoto
+from telegram import Bot
 
-# ---------------- CONFIGURATION ----------------
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS")
+PUBLIC_CHANNELS = os.getenv("PUBLIC_CHANNELS", "")
 PUBLIC_CHANNELS = [ch.strip() for ch in PUBLIC_CHANNELS.split(",") if ch.strip()]
 
+RSS_FEEDS = ["https://feeds.bbci.co.uk/sport/football/rss.xml"]
 DB_FILE = "messages.db"
 
 # ---------------- LOGGING ----------------
@@ -31,6 +34,28 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    conn.commit()
+    conn.close()
+
+def store_rss_to_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    for feed_url in RSS_FEEDS:
+        feed = feedparser.parse(feed_url)
+        for entry in feed.entries:
+            link = entry.get("link")
+            title = entry.get("title", "")
+            summary = entry.get("summary", "") or entry.get("description", "")
+            text_en = f"{title}\n{summary}\n{link}"
+
+            # Vérifie si déjà stocké
+            c.execute("SELECT 1 FROM messages WHERE text_en LIKE ?", (f"%{link}%",))
+            if c.fetchone():
+                continue
+
+            c.execute("INSERT INTO messages (text_en, image_url) VALUES (?, ?)", (text_en, None))
+    
     conn.commit()
     conn.close()
 
@@ -72,8 +97,8 @@ def translate_text(text):
         return text
 
 def enrich_message(text):
-    emoji = EMOJI_CATEGORIES[0]
-    accroche = PHRASES_ACCROCHE[0]
+    emoji = random.choice(EMOJI_CATEGORIES)
+    accroche = random.choice(PHRASES_ACCROCHE)
     hashtags = " ".join(HASHTAGS_FR)
     heure = datetime.now().strftime('%H:%M')
     clean = html_escape(clean_text(text))
@@ -84,7 +109,7 @@ def enrich_message(text):
 {hashtags}"""
     return message
 
-# ---------------- TELEGRAM BOT ----------------
+# ---------------- TELEGRAM ----------------
 bot = Bot(token=BOT_TOKEN)
 
 async def check_and_post():
@@ -113,11 +138,18 @@ async def check_and_post():
 
         await asyncio.sleep(5)
 
+# ---------------- SCHEDULER ----------------
+async def scheduler():
+    while True:
+        store_rss_to_db()   # Stocke le RSS dans SQLite
+        await check_and_post()  # Publie sur Telegram
+        await asyncio.sleep(300)  # toutes les 5 minutes
+
 # ---------------- MAIN ----------------
 async def main():
     init_db()
-    logger.info("🤖 Bot Telegram SQLite démarré")
-    await check_and_post()
+    logger.info("🤖 Bot Telegram RSS -> Public démarré")
+    await scheduler()
 
 if __name__ == "__main__":
     try:

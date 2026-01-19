@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import feedparser
 import logging
 import aiohttp
@@ -21,14 +22,68 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 
-# ---------------- IMAGE EXTRACTION ----------------
+# ---------------- VARIANTES FR ----------------
+TITLE_VARIANTS = [
+    "NOUVELLE FOOT",
+    "INFO FOOT",
+    "ACTUALITÉ FOOT",
+    "FLASH FOOT",
+    "DERNIÈRE MINUTE FOOT",
+    "ACTU FOOTBALL",
+    "FOOT À LA UNE",
+    "LE POINT FOOT",
+    "INFO MATCH",
+    "RÉSUMÉ FOOT",
+    "FOOT AUJOURD’HUI",
+    "ACTU MATCH",
+    "FOOT AFRICAIN",
+    "AFCON ACTUALITÉ",
+    "FOOT INTERNATIONAL",
+    "LE FAIT DU JOUR FOOT",
+    "ACTUALITÉ SPORT FOOT",
+    "FLASH MATCH",
+    "FOOT EN DIRECT",
+    "FOOT : L’ESSENTIEL"
+]
+
+HASHTAG_VARIANTS = [
+    "#Football", "#Foot", "#ActuFoot", "#InfoFoot", "#FootActu",
+    "#FootballAfricain", "#Afcon", "#FootInternational",
+    "#MatchDeFoot", "#FootAujourdHui", "#PassionFoot",
+    "#FansDeFoot", "#ActualiteSportive", "#FootNews",
+    "#FootAfrique", "#FootDuJour", "#ResumeFoot",
+    "#MondeDuFoot", "#FootLive", "#CultureFoot"
+]
+
+COMMENT_VARIANTS = [
+    "💬 Qu’en pensez-vous ?",
+    "🗣️ Donnez votre avis en commentaire",
+    "👇 Votre réaction nous intéresse",
+    "⚽ Dites-nous ce que vous en pensez",
+    "🔥 Êtes-vous d’accord avec cette info ?",
+    "📢 Débattons-en dans les commentaires",
+    "🤔 Bonne ou mauvaise nouvelle selon vous ?",
+    "💭 Votre analyse en commentaire",
+    "📝 Partagez votre opinion",
+    "🙌 On attend vos réactions",
+    "👀 Votre point de vue compte",
+    "⚽ Fans de foot, à vous la parole",
+    "📣 Laissez votre avis",
+    "🧠 Analysez cette actu avec nous",
+    "🔥 Réagissez maintenant",
+    "👇 Dites-le-nous en commentaire",
+    "🎯 Quel est votre avis ?",
+    "💬 On lit vos commentaires",
+    "⚽ Vous validez ou pas ?",
+    "🗨️ Exprimez-vous !"
+]
+
+# ---------------- IMAGE ----------------
 def extract_image(entry):
     if "media_content" in entry:
         return entry.media_content[0].get("url")
-
     if "media_thumbnail" in entry:
         return entry.media_thumbnail[0].get("url")
-
     html = entry.get("summary", "")
     match = re.search(r'<img[^>]+src="([^">]+)"', html)
     return match.group(1) if match else None
@@ -56,8 +111,12 @@ async def translate(text):
 
 # ---------------- FORMAT ----------------
 def format_message(title, summary, published):
+    header = random.choice(TITLE_VARIANTS)
+    hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
+    comment = random.choice(COMMENT_VARIANTS)
+
     return f"""
-🔥🔥 <b>NOUVELLE FOOT :</b> <i>{title}</i>
+🔥🔥 <b>{header} :</b> <i>{title}</i>
 
 <blockquote>{summary}</blockquote>
 
@@ -65,7 +124,9 @@ def format_message(title, summary, published):
 ⏰ <b>Publié :</b> {published}
 🏷️ <b>Catégorie :</b> MATCH
 
-#Football #Foot #Afcon #BBCSport
+{hashtags}
+
+<b>{comment}</b>
 """.strip()
 
 # ---------------- MAIN ----------------

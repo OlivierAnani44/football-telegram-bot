@@ -8,6 +8,7 @@ from datetime import datetime
 from html import escape as html_escape
 from googletrans import Translator
 from telegram import Bot
+from telegram.constants import ParseMode
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -89,9 +90,10 @@ def clean_text(text, max_len=500):
     text = re.sub(r'\s+',' ',text).strip()
     return text[:max_len]+"..." if len(text) > max_len else text
 
-def translate_text(text):
+def translate_text_safe(text):
     try:
-        return translator.translate(clean_text(text), src='en', dest='fr').text
+        result = translator.translate(clean_text(text), src='en', dest='fr')
+        return result.text if result else text
     except Exception as e:
         logger.error(f"❌ Erreur traduction : {e}")
         return text
@@ -112,37 +114,36 @@ def enrich_message(text):
 # ---------------- TELEGRAM ----------------
 bot = Bot(token=BOT_TOKEN)
 
+async def send_to_channel(chat_id, text, image_url=None):
+    try:
+        if image_url:
+            await bot.send_photo(chat_id=chat_id, photo=image_url, caption=text, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Publié sur {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Erreur publication sur {chat_id} : {e}")
+
+# ---------------- LOOP ----------------
 async def check_and_post():
-    while True:
-        messages = get_unposted_messages()
-        if not messages:
-            await asyncio.sleep(10)
-            continue
+    messages = get_unposted_messages()
+    if not messages:
+        return
 
-        for msg_id, text_en, image_url in messages:
-            text_fr = translate_text(text_en)
-            enriched = enrich_message(text_fr)
+    for msg_id, text_en, image_url in messages:
+        text_fr = translate_text_safe(text_en)
+        enriched = enrich_message(text_fr)
 
-            for ch in PUBLIC_CHANNELS:
-                try:
-                    if image_url:
-                        bot.send_photo(chat_id=ch, photo=image_url, caption=enriched, parse_mode='HTML')
-                    else:
-                        bot.send_message(chat_id=ch, text=enriched, parse_mode='HTML')
-                    logger.info(f"✅ Publié sur {ch}")
-                except Exception as e:
-                    logger.error(f"❌ Erreur publication sur {ch} : {e}")
+        for ch in PUBLIC_CHANNELS:
+            await send_to_channel(ch, enriched, image_url)
 
-            mark_posted(msg_id)
-            await asyncio.sleep(3)
+        mark_posted(msg_id)
+        await asyncio.sleep(3)
 
-        await asyncio.sleep(5)
-
-# ---------------- SCHEDULER ----------------
 async def scheduler():
     while True:
-        store_rss_to_db()   # Stocke le RSS dans SQLite
-        await check_and_post()  # Publie sur Telegram
+        store_rss_to_db()
+        await check_and_post()
         await asyncio.sleep(300)  # toutes les 5 minutes
 
 # ---------------- MAIN ----------------

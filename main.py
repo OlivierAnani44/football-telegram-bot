@@ -6,7 +6,6 @@ import feedparser
 import logging
 import aiohttp
 import asyncio
-from datetime import datetime
 from telegram import Bot
 from deep_translator import GoogleTranslator
 
@@ -101,7 +100,7 @@ async def translate(text):
         return text
 
 # ---------------- FORMAT MESSAGE ----------------
-def format_message(title, summary, published):
+def format_message(title, summary):
     header = random.choice(TITLE_VARIANTS)
     hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
     comment = random.choice(COMMENT_VARIANTS)
@@ -109,10 +108,6 @@ def format_message(title, summary, published):
 🔥🔥 <b>{header} :</b> <i>{title}</i>
 
 <blockquote>{summary}</blockquote>
-
-📌 <b>Source :</b> BBC Sport
-⏰ <b>Publié :</b> {published}
-🏷️ <b>Catégorie :</b> MATCH
 
 {hashtags}
 
@@ -139,7 +134,7 @@ def compute_importance(entry):
         "résultat": 7
     }
 
-    score = len(summary.split())  # longueur du résumé
+    score = len(summary.split())
     for kw, val in keywords_priority.items():
         if kw in summary or kw in title:
             score += val
@@ -147,20 +142,16 @@ def compute_importance(entry):
     return score
 
 def select_most_important(entries, posted):
-    # Filtrer les articles déjà postés
     candidates = [e for e in entries if (e.get("id") or e.get("link") or e.get("title")) not in posted]
     if not candidates:
         return None
-
-    # Trier par score d'importance
     candidates.sort(key=compute_importance, reverse=True)
-    return candidates[0]  # Retourne le plus important
+    return candidates[0]
 
 # ---------------- POST ----------------
 async def post_entry(entry, posted):
     title = await translate(entry.get("title", ""))
     summary = await translate(re.sub("<.*?>", "", entry.get("summary", "")))
-    published = entry.get("published", "—")
     entry_id = entry.get("id") or entry.get("link") or title
 
     if entry_id in posted:
@@ -168,7 +159,7 @@ async def post_entry(entry, posted):
 
     image_url = extract_image(entry)
     image_path = await download_image(image_url)
-    message = format_message(title, summary, published)
+    message = format_message(title, summary)
 
     for ch in CHANNELS:
         try:
@@ -202,9 +193,8 @@ async def main_loop():
 
     while True:
         feed = feedparser.parse(RSS_FEED)
-        entries = feed.entries[:30]  # On prend les 30 derniers posts
+        entries = feed.entries[:30]
 
-        # Sélection du post le plus important
         post_to_send = select_most_important(entries, posted)
         if post_to_send:
             await post_entry(post_to_send, posted)

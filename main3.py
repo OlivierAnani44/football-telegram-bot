@@ -14,35 +14,36 @@ if not BOT_TOKEN or not CHANNEL_ID:
 # =============================
 # CONFIG
 # =============================
-UNDERSTAT_URL = "https://understat.com/league/La_liga/2025"  # Remplace par saison actuelle
-MAX_MATCHES = 5  # Nombre de matchs à poster
+UNDERSTAT_API_URL = "https://understat.com/league/La_liga/2026"
+MAX_MATCHES = 5
 
 # =============================
-# FONCTION : Récupérer stats Understat
+# FETCH MATCHES VIA API
 # =============================
-def fetch_understat():
+def fetch_understat_matches():
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
-    r = requests.get(UNDERSTAT_URL, headers=headers)
+    r = requests.get(UNDERSTAT_API_URL, headers=headers)
     if r.status_code != 200:
         print("Erreur Understat:", r.status_code)
         return []
 
-    # Les données Understat sont dans le script de la page
+    # Understat met un script JSON dans "data-react-props"
     import re, json
-    data_match = re.search(r"var matchesData = JSON.parse\('(.+)'\);", r.text)
-    if not data_match:
-        print("Impossible de trouver les données JSON Understat")
+    pattern = re.compile(r"root\.App\.main = (.+);")
+    match = pattern.search(r.text)
+    if not match:
+        print("Impossible de trouver les données JSON")
         return []
 
-    json_text = data_match.group(1)
-    json_text = json_text.encode('utf-8').decode('unicode_escape')
-    matches = json.loads(json_text)
+    data_json = json.loads(match.group(1))
+    # Matches sont ici
+    matches = data_json['props']['pageProps']['matches']
     return matches[:MAX_MATCHES]
 
 # =============================
-# FONCTION : Poster sur Telegram
+# TELEGRAM
 # =============================
 def send_to_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -58,7 +59,7 @@ def send_to_telegram(message):
         print("Message envoyé:", message[:50], "...")
 
 # =============================
-# FONCTION : Générer message
+# GENERATE MESSAGE
 # =============================
 def generate_message(match):
     dt = datetime.datetime.fromtimestamp(int(match['datetime']))
@@ -78,10 +79,10 @@ def generate_message(match):
     return msg
 
 # =============================
-# PROGRAMME PRINCIPAL
+# MAIN
 # =============================
 def main():
-    matches = fetch_understat()
+    matches = fetch_understat_matches()
     if not matches:
         print("Aucun match récupéré")
         return

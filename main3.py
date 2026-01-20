@@ -3,11 +3,15 @@ import datetime
 import os
 import sys
 import statistics
+import json
 from typing import List, Tuple, Dict, Any
+from dataclasses import dataclass
+from enum import Enum
 
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+ANALYSIS_API_URL = os.getenv("ANALYSIS_API_URL", "http://localhost:8000/analyze")
 
 # debug pour confirmer que les variables existent
 print("DEBUG BOT_TOKEN:", "OK" if BOT_TOKEN else "MANQUANT")
@@ -34,6 +38,69 @@ BIG_TEAMS = [
     "Paris Saint-Germain", "Liverpool", "Arsenal", "Inter",
     "Juventus", "AC Milan", "Chelsea", "Borussia Dortmund"
 ]
+
+# ================= DATA CLASSES =================
+@dataclass
+class TeamForm:
+    wins: int
+    draws: int
+    losses: int
+    gf: int  # goals for
+    ga: int  # goals against
+    matches_analyzed: int
+    
+    @property
+    def win_rate(self) -> float:
+        if self.matches_analyzed == 0:
+            return 0.33
+        return self.wins / self.matches_analyzed
+    
+    @property
+    def goal_difference(self) -> int:
+        return self.gf - self.ga
+    
+    @property
+    def avg_goals_for(self) -> float:
+        if self.matches_analyzed == 0:
+            return 1.5
+        return self.gf / self.matches_analyzed
+    
+    @property
+    def avg_goals_against(self) -> float:
+        if self.matches_analyzed == 0:
+            return 1.5
+        return self.ga / self.matches_analyzed
+
+@dataclass
+class MatchPrediction:
+    home_team: str
+    away_team: str
+    prediction: str  # "home_win", "draw", "away_win"
+    confidence: float  # 0-10
+    odds: float
+    all_odds: Dict[str, float]
+    league: str
+    analysis: Dict[str, Any]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "home": self.home_team,
+            "away": self.away_team,
+            "pick": self.get_pick_text(),
+            "confidence": self.confidence,
+            "odds": self.odds,
+            "all_odds": self.all_odds,
+            "league": self.league,
+            "analysis": self.analysis
+        }
+    
+    def get_pick_text(self) -> str:
+        if self.prediction == "home_win":
+            return f"{self.home_team} gagne"
+        elif self.prediction == "away_win":
+            return f"{self.away_team} gagne"
+        else:
+            return "Match nul"
 
 # ================= UTILS =================
 def log(msg: str) -> None:
@@ -76,7 +143,7 @@ def get_matches_today(league: str) -> List[Dict]:
         log(f"[ERROR] {league} → Erreur JSON: {e}")
         return []
 
-def get_team_form(team_id: str, league: str) -> Dict[str, int]:
+def get_team_form(team_id: str, league: str) -> TeamForm:
     """Get team form from last 5 matches"""
     url = f"https://site.web.api.espn.com/apis/site/v2/sports/soccer/{league}/teams/{team_id}/schedule"
     
@@ -91,7 +158,7 @@ def get_team_form(team_id: str, league: str) -> Dict[str, int]:
         # Take only completed matches
         events = data.get("events", [])
         if not events:
-            return {"wins": 0, "draws": 0, "losses": 0, "gf": 0, "ga": 0, "matches_analyzed": 0}
+            return TeamForm(0, 0, 0, 0, 0, 0)
         
         completed_matches = []
         for e in events:
@@ -139,161 +206,240 @@ def get_team_form(team_id: str, league: str) -> Dict[str, int]:
     except Exception as e:
         log(f"[WARN] Erreur générale get_team_form: {e}")
     
-    return {
-        "wins": wins, 
-        "draws": draws, 
-        "losses": losses, 
-        "gf": gf, 
-        "ga": ga,
-        "matches_analyzed": matches_analyzed
-    }
+    return TeamForm(wins, draws, losses, gf, ga, matches_analyzed)
 
-def calculate_confidence_score(formH: Dict, formA: Dict, teamH: str, teamA: str, league: str) -> Dict[str, float]:
-    """Calculate multiple confidence scores with advanced metrics"""
-    
-    # Initial scores
-    scores = {
-        "home_win": 5.0,
-        "draw": 5.0,
-        "away_win": 5.0
+# ================= ANALYSIS API =================
+def analyze_match_with_ai(
+    home_team: str,
+    away_team: str,
+    home_form: TeamForm,
+    away_form: TeamForm,
+    league: str,
+    is_home_big_team: bool,
+    is_away_big_team: bool
+) -> Dict[str, Any]:
+    """
+    Analyse un match en utilisant l'API d'analyse IA
+    """
+    # Préparer les données pour l'API
+    match_data = {
+        "home_team": home_team,
+        "away_team": away_team,
+        "home_form": {
+            "wins": home_form.wins,
+            "draws": home_form.draws,
+            "losses": home_form.losses,
+            "goals_for": home_form.gf,
+            "goals_against": home_form.ga,
+            "matches_analyzed": home_form.matches_analyzed,
+            "win_rate": home_form.win_rate,
+            "avg_goals_for": home_form.avg_goals_for,
+            "avg_goals_against": home_form.avg_goals_against,
+            "goal_difference": home_form.goal_difference
+        },
+        "away_form": {
+            "wins": away_form.wins,
+            "draws": away_form.draws,
+            "losses": away_form.losses,
+            "goals_for": away_form.gf,
+            "goals_against": away_form.ga,
+            "matches_analyzed": away_form.matches_analyzed,
+            "win_rate": away_form.win_rate,
+            "avg_goals_for": away_form.avg_goals_for,
+            "avg_goals_against": away_form.avg_goals_against,
+            "goal_difference": away_form.goal_difference
+        },
+        "league": league,
+        "context": {
+            "is_home_big_team": is_home_big_team,
+            "is_away_big_team": is_away_big_team,
+            "home_advantage": True,
+            "is_champions_league": "champions" in league,
+            "match_date": datetime.date.today().isoformat()
+        }
     }
     
-    # Base form analysis (40%)
-    if formH["matches_analyzed"] > 0 and formA["matches_analyzed"] > 0:
-        home_strength = (formH["wins"] * 3 + formH["draws"]) / formH["matches_analyzed"]
-        away_strength = (formA["wins"] * 3 + formA["draws"]) / formA["matches_analyzed"]
+    try:
+        # Appeler l'API d'analyse
+        response = requests.post(
+            ANALYSIS_API_URL,
+            json=match_data,
+            timeout=10,
+            headers={"Content-Type": "application/json"}
+        )
         
-        form_diff = home_strength - away_strength
-        
-        scores["home_win"] += form_diff * 2.0
-        scores["away_win"] -= form_diff * 2.0
-    
-    # Goal metrics (30%)
-    if formH["matches_analyzed"] > 0:
-        home_avg_gf = formH["gf"] / formH["matches_analyzed"]
-        home_avg_ga = formH["ga"] / formH["matches_analyzed"]
-    else:
-        home_avg_gf = home_avg_ga = 1.5
-    
-    if formA["matches_analyzed"] > 0:
-        away_avg_gf = formA["gf"] / formA["matches_analyzed"]
-        away_avg_ga = formA["ga"] / formA["matches_analyzed"]
-    else:
-        away_avg_gf = away_avg_ga = 1.5
-    
-    # Expected goals analysis
-    expected_home_goals = (home_avg_gf + away_avg_ga) / 2
-    expected_away_goals = (away_avg_gf + home_avg_ga) / 2
-    
-    goal_diff = expected_home_goals - expected_away_goals
-    scores["home_win"] += goal_diff * 0.5
-    scores["away_win"] -= goal_diff * 0.5
-    
-    # Draw likelihood based on goal expectations
-    # Matches with close expected goals are more likely to draw
-    goal_proximity = 1.0 - min(1.0, abs(goal_diff) / 3.0)
-    scores["draw"] += goal_proximity * 1.5
-    
-    # Home advantage (15%)
-    scores["home_win"] += 1.2
-    scores["draw"] += 0.4
-    
-    # Team reputation (10%)
-    if teamH in BIG_TEAMS:
-        scores["home_win"] += 1.5
-        scores["draw"] += 0.3
-    if teamA in BIG_TEAMS:
-        scores["away_win"] += 1.5
-        scores["draw"] += 0.3
-    
-    # League-specific adjustments (5%)
-    if "champions" in league:
-        # Champions League tends to have fewer draws
-        scores["draw"] -= 0.5
-    
-    # Normalize scores
-    for key in scores:
-        scores[key] = max(1.0, min(10.0, scores[key]))
-    
-    return scores
+        if response.status_code == 200:
+            return response.json()
+        else:
+            log(f"[WARN] API d'analyse retourne {response.status_code}: {response.text}")
+            # Fallback: utiliser l'analyse locale
+            return analyze_match_locally(match_data)
+            
+    except requests.exceptions.RequestException as e:
+        log(f"[WARN] Erreur API d'analyse: {e}")
+        # Fallback: utiliser l'analyse locale
+        return analyze_match_locally(match_data)
 
-def calculate_realistic_odds(confidence_scores: Dict[str, float]) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Calculate realistic betting odds based on confidence scores"""
+def analyze_match_locally(match_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Analyse locale en fallback si l'API n'est pas disponible
+    """
+    home_form = match_data["home_form"]
+    away_form = match_data["away_form"]
+    context = match_data["context"]
     
-    # Convert scores to probabilities
-    total = sum(confidence_scores.values())
-    probabilities = {
-        "home_win": confidence_scores["home_win"] / total,
-        "draw": confidence_scores["draw"] / total,
-        "away_win": confidence_scores["away_win"] / total
-    }
-    
-    # Apply bookmaker margin (typically 5-10%)
-    margin = 1.05  # 5% margin
-    odds = {
-        "home_win": round(margin / probabilities["home_win"], 2),
-        "draw": round(margin / probabilities["draw"], 2),
-        "away_win": round(margin / probabilities["away_win"], 2)
-    }
-    
-    # Ensure minimum odds
-    for key in odds:
-        if odds[key] < 1.5:
-            odds[key] = 1.5
-        if odds[key] > 10:
-            odds[key] = 10
-    
-    return odds, probabilities
-
-def predict_match_v2(teamH: str, teamA: str, formH: Dict, formA: Dict, league: str) -> Tuple[str, float, float, Dict[str, float]]:
-    """Enhanced prediction with realistic odds"""
-    
-    # Calculate confidence scores for all outcomes
-    confidence_scores = calculate_confidence_score(formH, formA, teamH, teamA, league)
-    
-    # Calculate realistic odds
-    odds, probabilities = calculate_realistic_odds(confidence_scores)
-    
-    # Determine the most likely outcome
-    max_score = max(confidence_scores.values())
-    outcomes = list(confidence_scores.keys())
-    scores_list = list(confidence_scores.values())
-    
-    # Get the outcome with highest confidence
-    max_index = scores_list.index(max_score)
-    best_outcome = outcomes[max_index]
-    
-    # Map outcome to readable prediction
-    outcome_map = {
-        "home_win": f"{teamH} gagne",
-        "draw": "Match nul",
-        "away_win": f"{teamA} gagne"
-    }
-    
-    pick = outcome_map[best_outcome]
-    
-    # Calculate composite confidence (weighted average)
-    composite_confidence = (
-        confidence_scores["home_win"] * probabilities["home_win"] +
-        confidence_scores["draw"] * probabilities["draw"] +
-        confidence_scores["away_win"] * probabilities["away_win"]
+    # Calcul des probabilités de base
+    home_strength = (
+        home_form["win_rate"] * 3 +
+        (home_form["avg_goals_for"] - home_form["avg_goals_against"]) * 0.2
+    )
+    away_strength = (
+        away_form["win_rate"] * 3 +
+        (away_form["avg_goals_for"] - away_form["avg_goals_against"]) * 0.2
     )
     
-    # Get odds for the selected outcome
-    selected_odds = odds[best_outcome]
+    # Avantage domicile
+    home_advantage = 0.3 if context["home_advantage"] else 0
     
-    return pick, round(composite_confidence, 1), selected_odds, odds
+    # Bonus pour les grosses équipes
+    home_big_team_bonus = 0.4 if context["is_home_big_team"] else 0
+    away_big_team_bonus = 0.4 if context["is_away_big_team"] else 0
+    
+    # Calcul final des forces
+    total_home_strength = home_strength + home_advantage + home_big_team_bonus
+    total_away_strength = away_strength + away_big_team_bonus
+    
+    # Calcul des probabilités
+    total = total_home_strength + total_away_strength + 1.0  # +1 pour le nul
+    
+    prob_home_win = total_home_strength / (total + 2)
+    prob_away_win = total_away_strength / (total + 2)
+    prob_draw = 1.0 / (total + 2)
+    
+    # Ajustement pour la Ligue des Champions
+    if context["is_champions_league"]:
+        prob_draw *= 0.8  # Moins de nuls en Champions
+        prob_home_win *= 1.1
+        prob_away_win *= 1.1
+    
+    # Normalisation
+    total_prob = prob_home_win + prob_draw + prob_away_win
+    prob_home_win /= total_prob
+    prob_draw /= total_prob
+    prob_away_win /= total_prob
+    
+    # Déterminer le pronostic
+    if prob_home_win > prob_away_win and prob_home_win > prob_draw:
+        prediction = "home_win"
+        confidence = prob_home_win * 10
+    elif prob_away_win > prob_home_win and prob_away_win > prob_draw:
+        prediction = "away_win"
+        confidence = prob_away_win * 10
+    else:
+        prediction = "draw"
+        confidence = prob_draw * 10
+    
+    # Calcul des cotes avec marge
+    margin = 1.05  # 5% de marge
+    odds_home = round(margin / prob_home_win, 2) if prob_home_win > 0 else 100
+    odds_draw = round(margin / prob_draw, 2) if prob_draw > 0 else 100
+    odds_away = round(margin / prob_away_win, 2) if prob_away_win > 0 else 100
+    
+    # Limiter les cotes
+    odds_home = max(1.5, min(20, odds_home))
+    odds_draw = max(1.5, min(20, odds_draw))
+    odds_away = max(1.5, min(20, odds_away))
+    
+    return {
+        "prediction": prediction,
+        "confidence": round(confidence, 2),
+        "probabilities": {
+            "home_win": round(prob_home_win, 3),
+            "draw": round(prob_draw, 3),
+            "away_win": round(prob_away_win, 3)
+        },
+        "odds": {
+            "home_win": odds_home,
+            "draw": odds_draw,
+            "away_win": odds_away
+        },
+        "analysis": {
+            "home_strength": round(total_home_strength, 2),
+            "away_strength": round(total_away_strength, 2),
+            "home_advantage": home_advantage,
+            "big_team_bonus": {
+                "home": home_big_team_bonus,
+                "away": away_big_team_bonus
+            },
+            "matchup_balance": "Équilibré" if abs(total_home_strength - total_away_strength) < 0.5 else "Déséquilibré"
+        },
+        "source": "local_fallback"
+    }
 
-def diversify_predictions(matches: List[Dict]) -> List[Dict]:
+def predict_match_with_ai(
+    home_team: str,
+    away_team: str,
+    home_form: TeamForm,
+    away_form: TeamForm,
+    league: str
+) -> MatchPrediction:
+    """
+    Prédire le résultat d'un match en utilisant l'analyse IA
+    """
+    is_home_big_team = home_team in BIG_TEAMS
+    is_away_big_team = away_team in BIG_TEAMS
+    
+    # Analyser le match avec l'API IA
+    analysis_result = analyze_match_with_ai(
+        home_team, away_team, home_form, away_form,
+        league, is_home_big_team, is_away_big_team
+    )
+    
+    # Extraire la ligue en format lisible
+    league_parts = league.split(".")
+    if len(league_parts) > 1:
+        league_name = league_parts[0].upper()
+    else:
+        league_name = league.upper()
+    
+    # Créer la prédiction
+    prediction = analysis_result["prediction"]
+    confidence = analysis_result["confidence"]
+    odds_dict = analysis_result["odds"]
+    
+    # Sélectionner la cote correspondante
+    if prediction == "home_win":
+        odds = odds_dict["home_win"]
+    elif prediction == "away_win":
+        odds = odds_dict["away_win"]
+    else:
+        odds = odds_dict["draw"]
+    
+    return MatchPrediction(
+        home_team=home_team,
+        away_team=away_team,
+        prediction=prediction,
+        confidence=confidence,
+        odds=odds,
+        all_odds=odds_dict,
+        league=league_name,
+        analysis=analysis_result.get("analysis", {})
+    )
+
+# ================= DIVERSIFICATION =================
+def diversify_predictions(matches: List[MatchPrediction]) -> List[MatchPrediction]:
     """Ensure prediction diversity in the combo"""
     
     if len(matches) < 3:
         return matches
     
+    # Convertir en dict pour manipulation
+    match_dicts = [m.to_dict() for m in matches]
+    
     # Count outcome types
     outcome_counts = {"home_wins": 0, "draws": 0, "away_wins": 0}
     
-    for match in matches:
+    for match in match_dicts:
         if "gagne" in match["pick"]:
             if match["home"] in match["pick"]:
                 outcome_counts["home_wins"] += 1
@@ -303,10 +449,10 @@ def diversify_predictions(matches: List[Dict]) -> List[Dict]:
             outcome_counts["draws"] += 1
     
     # If too many draws, diversify
-    max_draws = max(2, len(matches) // 3)  # Max 33% draws
+    max_draws = max(2, len(match_dicts) // 3)  # Max 33% draws
     
     if outcome_counts["draws"] > max_draws:
-        sorted_matches = sorted(matches, key=lambda x: x["confidence"], reverse=True)
+        sorted_matches = sorted(match_dicts, key=lambda x: x["confidence"], reverse=True)
         
         # Replace some draws with other outcomes
         for match in sorted_matches:
@@ -315,33 +461,51 @@ def diversify_predictions(matches: List[Dict]) -> List[Dict]:
                 
             if "Match nul" in match["pick"]:
                 # Get alternative odds for this match
-                if "all_odds" in match:
-                    odds = match["all_odds"]
-                    # Choose the next best outcome
-                    if odds.get("home_win", 2.0) <= odds.get("away_win", 2.0):
-                        new_pick = f"{match['home']} gagne"
-                        new_odds = odds.get("home_win", 2.0)
-                    else:
-                        new_pick = f"{match['away']} gagne"
-                        new_odds = odds.get("away_win", 2.0)
-                    
-                    # Update match
-                    match["pick"] = new_pick
-                    match["odds"] = new_odds
-                    match["confidence"] = match["confidence"] * 0.9  # Slightly reduce confidence
-                    
-                    outcome_counts["draws"] -= 1
-                    
-                    if new_pick == f"{match['home']} gagne":
-                        outcome_counts["home_wins"] += 1
-                    else:
-                        outcome_counts["away_wins"] += 1
+                odds = match.get("all_odds", {})
+                # Choose the next best outcome
+                if odds.get("home_win", 2.0) <= odds.get("away_win", 2.0):
+                    new_pick = f"{match['home']} gagne"
+                    new_odds = odds.get("home_win", 2.0)
+                    new_prediction = "home_win"
+                else:
+                    new_pick = f"{match['away']} gagne"
+                    new_odds = odds.get("away_win", 2.0)
+                    new_prediction = "away_win"
+                
+                # Update match
+                match["pick"] = new_pick
+                match["odds"] = new_odds
+                match["confidence"] = match["confidence"] * 0.9  # Slightly reduce confidence
+                
+                outcome_counts["draws"] -= 1
+                
+                if new_prediction == "home_win":
+                    outcome_counts["home_wins"] += 1
+                else:
+                    outcome_counts["away_wins"] += 1
     
-    return matches
+    # Convertir de nouveau en MatchPrediction
+    diversified_matches = []
+    for match_dict in match_dicts:
+        prediction = MatchPrediction(
+            home_team=match_dict["home"],
+            away_team=match_dict["away"],
+            prediction="home_win" if match_dict["home"] in match_dict["pick"] else 
+                      "away_win" if match_dict["away"] in match_dict["pick"] else "draw",
+            confidence=match_dict["confidence"],
+            odds=match_dict["odds"],
+            all_odds=match_dict["all_odds"],
+            league=match_dict["league"],
+            analysis=match_dict.get("analysis", {})
+        )
+        diversified_matches.append(prediction)
+    
+    return diversified_matches
 
-def format_improved_combo(title: str, bets: List[Dict], risk_level: str) -> str:
+# ================= FORMATTING =================
+def format_combo_message(title: str, predictions: List[MatchPrediction], risk_level: str) -> str:
     """Format combo message for Telegram"""
-    if not bets:
+    if not predictions:
         return f"<b>{title}</b>\n\nAucun pronostic {risk_level} sélectionné aujourd'hui."
     
     message = f"<b>{title}</b>\n"
@@ -350,26 +514,34 @@ def format_improved_combo(title: str, bets: List[Dict], risk_level: str) -> str:
     
     total_odds = 1.0
     
-    for i, bet in enumerate(bets, 1):
-        total_odds *= bet["odds"]
+    for i, pred in enumerate(predictions, 1):
+        total_odds *= pred.odds
         
         # Determine emoji based on prediction type
-        if "Match nul" in bet["pick"]:
+        if pred.prediction == "draw":
             outcome_emoji = "⚖️"
-        elif bet["home"] in bet["pick"]:
+        elif pred.prediction == "home_win":
             outcome_emoji = "🏠"
         else:
             outcome_emoji = "✈️"
         
         # Confidence indicator
-        confidence_int = int(bet["confidence"])
+        confidence_int = int(pred.confidence)
         conf_bars = "★" * min(5, confidence_int // 2) + "☆" * (5 - min(5, confidence_int // 2))
         
+        # Analysis insights
+        analysis_insight = ""
+        if pred.analysis:
+            if pred.analysis.get("matchup_balance") == "Déséquilibré":
+                analysis_insight = " ⚡ Match déséquilibré"
+            elif "home_advantage" in pred.analysis and pred.analysis["home_advantage"] > 0:
+                analysis_insight = " 🏟️ Avantage domicile"
+        
         message += (
-            f"{i}. <b>{bet['home']} vs {bet['away']}</b>\n"
-            f"   {outcome_emoji} <b>{bet['pick']}</b>\n"
-            f"   🏆 {bet.get('league', '?')} | 📊 {conf_bars} ({bet['confidence']}/10)\n"
-            f"   💰 Cote: <b>{bet['odds']}</b>\n\n"
+            f"{i}. <b>{pred.home_team} vs {pred.away_team}</b>\n"
+            f"   {outcome_emoji} <b>{pred.get_pick_text()}</b>{analysis_insight}\n"
+            f"   🏆 {pred.league} | 📊 {conf_bars} ({pred.confidence:.1f}/10)\n"
+            f"   💰 Cote: <b>{pred.odds}</b>\n\n"
         )
     
     # Calculate realistic stake
@@ -382,7 +554,7 @@ def format_improved_combo(title: str, bets: List[Dict], risk_level: str) -> str:
     
     message += (
         f"📈 <b>RÉSUMÉ DU COMBINÉ</b>\n"
-        f"├ Nombre de matchs: {len(bets)}\n"
+        f"├ Nombre de matchs: {len(predictions)}\n"
         f"├ Cote totale: <b>{round(total_odds, 2)}</b>\n"
         f"├ Mise recommandée: <b>{recommended_stake}€</b>\n"
         f"└ Gain potentiel: <b>{potential_win}€</b>\n\n"
@@ -393,12 +565,12 @@ def format_improved_combo(title: str, bets: List[Dict], risk_level: str) -> str:
 
 # ================= MAIN =================
 def main():
-    log("🚀 Bot de pronostics démarré (version améliorée)")
-    send_telegram("✅ <b>Bot pronostics actif - Version 2.0</b>")
+    log("🚀 Bot de pronostics avec analyse IA démarré")
+    send_telegram("✅ <b>Bot pronostics avec IA actif</b>")
     
-    medium_bets = []
-    risk_bets = []
-    all_matches = []
+    medium_predictions = []
+    risk_predictions = []
+    all_predictions = []
     
     log("📊 Récupération des matchs du jour...")
     
@@ -414,51 +586,34 @@ def main():
                     
                 h, a = competitors[0], competitors[1]
                 
-                teamH = h.get("team", {}).get("displayName", "Inconnu")
-                teamA = a.get("team", {}).get("displayName", "Inconnu")
-                teamH_id = h.get("team", {}).get("id")
-                teamA_id = a.get("team", {}).get("id")
+                home_team = h.get("team", {}).get("displayName", "Inconnu")
+                away_team = a.get("team", {}).get("displayName", "Inconnu")
+                home_id = h.get("team", {}).get("id")
+                away_id = a.get("team", {}).get("id")
                 
-                if not teamH_id or not teamA_id:
-                    log(f"[SKIP] {teamH} vs {teamA} - IDs manquants")
+                if not home_id or not away_id:
+                    log(f"[SKIP] {home_team} vs {away_team} - IDs manquants")
                     continue
                 
                 # Skip if match already started or finished
                 status = match.get("status", {})
                 status_type = status.get("type", {})
                 if status_type.get("id") != "1":  # 1 = scheduled
-                    log(f"[SKIP] {teamH} vs {teamA} - Match déjà commencé ou terminé")
+                    log(f"[SKIP] {home_team} vs {away_team} - Match déjà commencé ou terminé")
                     continue
                 
                 # Get team forms
-                formH = get_team_form(teamH_id, league)
-                formA = get_team_form(teamA_id, league)
+                home_form = get_team_form(home_id, league)
+                away_form = get_team_form(away_id, league)
                 
-                # Make prediction
-                pick, confidence, odds, all_odds = predict_match_v2(
-                    teamH, teamA, formH, formA, league
+                # Make prediction with AI analysis
+                prediction = predict_match_with_ai(
+                    home_team, away_team, home_form, away_form, league
                 )
                 
-                # Extract league name in readable format
-                league_parts = league.split(".")
-                if len(league_parts) > 1:
-                    league_name = league_parts[0].upper()
-                else:
-                    league_name = league.upper()
+                all_predictions.append(prediction)
                 
-                match_data = {
-                    "home": teamH,
-                    "away": teamA,
-                    "pick": pick,
-                    "confidence": confidence,
-                    "odds": odds,
-                    "all_odds": all_odds,
-                    "league": league_name
-                }
-                
-                all_matches.append(match_data)
-                
-                log(f"[MATCH] {teamH} vs {teamA} → {confidence}/10 → {pick} (cote: {odds})")
+                log(f"[MATCH] {home_team} vs {away_team} → {prediction.confidence:.1f}/10 → {prediction.get_pick_text()} (cote: {prediction.odds})")
                 
             except KeyError as e:
                 log(f"[ERROR] Données manquantes pour un match: {e}")
@@ -468,48 +623,52 @@ def main():
                 continue
     
     # Sort by confidence
-    all_matches.sort(key=lambda x: x["confidence"], reverse=True)
+    all_predictions.sort(key=lambda x: x.confidence, reverse=True)
     
-    # Select medium bets (top confidence)
-    medium_bets = [m for m in all_matches if m["confidence"] >= 6.5][:3]
+    # Select medium predictions (top confidence)
+    medium_predictions = [p for p in all_predictions if p.confidence >= 6.5][:3]
     
-    # Select risk bets (next best, with diversity)
-    medium_match_ids = [(m["home"], m["away"]) for m in medium_bets]
-    remaining = [m for m in all_matches 
-                if (m["home"], m["away"]) not in medium_match_ids 
-                and m["confidence"] >= 5.0]
-    risk_bets = remaining[:5]
+    # Select risk predictions (next best, with diversity)
+    medium_match_ids = [(p.home_team, p.away_team) for p in medium_predictions]
+    remaining = [p for p in all_predictions 
+                if (p.home_team, p.away_team) not in medium_match_ids 
+                and p.confidence >= 5.0]
+    risk_predictions = remaining[:5]
     
-    # Ensure prediction diversity in risk bets
-    risk_bets = diversify_predictions(risk_bets)
+    # Ensure prediction diversity in risk predictions
+    risk_predictions = diversify_predictions(risk_predictions)
     
     # Send messages
-    if medium_bets:
-        send_telegram(format_improved_combo("🔵 COMBINÉ SÉCURISÉ", medium_bets, "MEDIUM"))
+    if medium_predictions:
+        send_telegram(format_combo_message("🔵 COMBINÉ SÉCURISÉ (IA)", medium_predictions, "MEDIUM"))
     else:
         send_telegram("ℹ️ <b>Aucun pronostic sécurisé aujourd'hui (confiance < 6.5/10)</b>")
     
-    if risk_bets:
-        send_telegram(format_improved_combo("🔴 COMBINÉ RISK (DIVERSIFIÉ)", risk_bets, "RISK"))
+    if risk_predictions:
+        send_telegram(format_combo_message("🔴 COMBINÉ RISK (IA DIVERSIFIÉ)", risk_predictions, "RISK"))
     else:
         send_telegram("ℹ️ <b>Aucun pronostic risk aujourd'hui (confiance < 5.0/10)</b>")
     
     # Send statistics
-    if all_matches:
-        avg_confidence = statistics.mean([m["confidence"] for m in all_matches])
+    if all_predictions:
+        avg_confidence = statistics.mean([p.confidence for p in all_predictions])
+        pred_source = "API IA" if ANALYSIS_API_URL != "http://localhost:8000/analyze" else "Fallback local"
     else:
         avg_confidence = 0
+        pred_source = "Aucune"
     
     stats_msg = (
         f"📊 <b>STATISTIQUES DU JOUR</b>\n"
-        f"├ Matchs analysés: {len(all_matches)}\n"
-        f"├ Pronostics sécurisés: {len(medium_bets)}\n"
-        f"├ Pronostics risk: {len(risk_bets)}\n"
-        f"└ Fiabilité moyenne: {avg_confidence:.1f}/10"
+        f"├ Matchs analysés: {len(all_predictions)}\n"
+        f"├ Pronostics sécurisés: {len(medium_predictions)}\n"
+        f"├ Pronostics risk: {len(risk_predictions)}\n"
+        f"├ Fiabilité moyenne: {avg_confidence:.1f}/10\n"
+        f"└ Source analyse: {pred_source}"
     )
     send_telegram(stats_msg)
     
-    log(f"✅ Terminé: {len(medium_bets)} MEDIUM, {len(risk_bets)} RISK")
+    log(f"✅ Terminé: {len(medium_predictions)} MEDIUM, {len(risk_predictions)} RISK")
+    log(f"📡 API utilisée: {ANALYSIS_API_URL}")
 
 if __name__ == "__main__":
     main()

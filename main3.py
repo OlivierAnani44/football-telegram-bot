@@ -1,135 +1,161 @@
-import os
 import requests
-from datetime import datetime
+import datetime
+import math
 
-# =============================
-# CONFIGURATION
-# =============================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")
+# ================= CONFIG =================
 
-if not BOT_TOKEN or not CHANNEL_ID:
-    raise RuntimeError("BOT_TOKEN ou CHANNEL_ID manquant")
+BOT_TOKEN = "TON_BOT_TOKEN"
+CHANNEL_ID = "TON_CHANNEL_ID"
 
-# =============================
-# TELEGRAM
-# =============================
-def send_to_telegram(message: str):
+LEAGUES = [
+    "uefa.champions",
+    "eng.1",
+    "esp.1",
+    "ita.1",
+    "ger.1",
+    "fra.1",
+    "por.1",
+    "ned.1"
+]
+
+MIN_CONFIDENCE = 6        # filtre bookmaker
+MAX_COMBINED = 5          # nombre max de matchs dans le combiné
+
+# ==========================================
+
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHANNEL_ID, "text": message, "parse_mode": "HTML"}
-    requests.post(url, data=payload, timeout=15)
+    requests.post(url, json={
+        "chat_id": CHANNEL_ID,
+        "text": message
+    })
 
-# =============================
-# ESPN - TOP LIGUES + CL
-# =============================
-ESPN_BASE = "http://site.api.espn.com/apis/site/v2/sports"
-TOP_LEAGUES = {
-    "Champions League": "soccer/uefa.champions",
-    "Premier League": "soccer/eng.1",
-    "La Liga": "soccer/esp.1",
-    "Serie A": "soccer/ita.1",
-    "Bundesliga": "soccer/ger.1",
-    "Ligue 1": "soccer/fra.1"
-}
-
-# =============================
-# Récupérer matchs du jour
-# =============================
-def fetch_espn_today_matches(league_api):
-    today = datetime.utcnow().strftime("%Y%m%d")
-    url = f"{ESPN_BASE}/{league_api}/scoreboard?dates={today}"
+def get_matches_today(league):
+    today = datetime.date.today().strftime("%Y%m%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard?dates={today}"
     try:
-        res = requests.get(url, timeout=20).json()
-        return res.get("events", [])
+        return requests.get(url, timeout=10).json().get("events", [])
     except:
         return []
 
-# =============================
-# Récupérer stats détaillées
-# =============================
-def fetch_match_stats(league_api, game_id):
-    url = f"{ESPN_BASE}/{league_api}/summary?event={game_id}"
+def get_team_form(team_id, league):
+    url = f"https://site.web.api.espn.com/apis/site/v2/sports/soccer/{league}/teams/{team_id}/schedule"
+    wins = draws = losses = gf = ga = 0
+
     try:
-        res = requests.get(url, timeout=20).json()
-        stats = {}
-        if "boxscore" in res:
-            teams = res["boxscore"].get("teams", [])
-            for t in teams:
-                team_name = t["team"]["displayName"]
-                team_stats = {}
-                for s in t.get("statistics", []):
-                    team_stats[s["name"]] = s.get("displayValue", "N/A")
-                stats[team_name] = team_stats
-        return stats
+        data = requests.get(url, timeout=10).json()
+        for e in data.get("events", [])[:5]:
+            comp = e["competitions"][0]["competitors"]
+            h, a = comp[0], comp[1]
+
+            if h["id"] == team_id:
+                sf, sa = int(h.get("score", 0)), int(a.get("score", 0))
+            else:
+                sf, sa = int(a.get("score", 0)), int(h.get("score", 0))
+
+            gf += sf
+            ga += sa
+
+            if sf > sa:
+                wins += 1
+            elif sf < sa:
+                losses += 1
+            else:
+                draws += 1
     except:
-        return {}
+        pass
 
-# =============================
-# Formater message Telegram
-# =============================
-def format_espn_match_message(match, league_api):
-    try:
+    return {
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "gf": gf,
+        "ga": ga
+    }
+
+def compute_power(form, home=False):
+    score = (
+        form["wins"] * 3 +
+        form["draws"] +
+        (form["gf"] - form["ga"]) * 0.4
+    )
+    if home:
+        score += 0.5
+    return score
+
+def predict_match(teamH, teamA, formH, formA):
+    sH = compute_power(formH, home=True)
+    sA = compute_power(formA)
+
+    diff = sH - sA
+    confidence = min(10, max(1, abs(diff)))
+
+    if diff > 1:
+        pick = f"{teamH} gagne"
+    elif diff < -1:
+        pick = f"{teamA} gagne"
+    else:
+        pick = "Match nul"
+
+    probability = confidence / 10
+    odds = round(1 / probability, 2)
+
+    return pick, confidence, odds
+
+# ================== MAIN ==================
+
+combined_bets = []
+combined_odds = 1.0
+
+for league in LEAGUES:
+    matches = get_matches_today(league)
+
+    for match in matches:
         comp = match["competitions"][0]
-        team1 = comp["competitors"][0]["team"]["displayName"]
-        team2 = comp["competitors"][1]["team"]["displayName"]
-        score = f"{comp['competitors'][0].get('score','0')}-{comp['competitors'][1].get('score','0')}"
+        home, away = comp["competitors"]
 
-        stats_json = fetch_match_stats(league_api, match["id"])
+        teamH = home["team"]["displayName"]
+        teamA = away["team"]["displayName"]
 
-        # Mapping stat → lisible
-        stat_fields = {
-            "shots": "Tirs",
-            "shotsOnGoal": "Tirs cadrés",
-            "possession": "Possession (%)",
-            "corners": "Corners",
-            "fouls": "Fautes",
-            "yellowCards": "Cartons jaunes",
-            "redCards": "Cartons rouges",
-            "offsides": "Hors-jeu",
-            "passes": "Passes",
-            "passAccuracy": "Précision passes (%)",
-            "tackles": "Tacles",
-            "goalAssists": "Passes décisives",
-            "goals": "Buts"
-        }
+        formH = get_team_form(home["team"]["id"], league)
+        formA = get_team_form(away["team"]["id"], league)
 
-        stats_text = ""
-        for field, label in stat_fields.items():
-            val1 = stats_json.get(team1, {}).get(field, "N/A")
-            val2 = stats_json.get(team2, {}).get(field, "N/A")
-            stats_text += f"{label}: {val1} - {val2}\n"
+        pick, confidence, odds = predict_match(teamH, teamA, formH, formA)
 
-        message = f"""
-🏆 {league_api.replace('soccer/', '').title()}
-⚽ {team1} vs {team2}
-📊 Score : {score}
-
-📈 Statistiques détaillées :
-{stats_text.strip()}
-
-🔮 Analyse simple :
-Avantage probable : {'Équilibré' if not stats_json else 'À définir selon stats'}
-""".strip()
-        return message
-    except Exception as e:
-        return f"Erreur format match: {e}"
-
-# =============================
-# MAIN
-# =============================
-def main():
-    for league_name, league_api in TOP_LEAGUES.items():
-        matches = fetch_espn_today_matches(league_api)
-        if not matches:
+        if confidence < MIN_CONFIDENCE:
             continue
 
-        send_to_telegram(f"🏆 {league_name} – Matchs du jour")
-        for match in matches:
-            msg = format_espn_match_message(match, league_api)
-            if msg:
-                send_to_telegram(msg)
+        combined_bets.append({
+            "league": league,
+            "match": f"{teamH} vs {teamA}",
+            "pick": pick,
+            "confidence": confidence,
+            "odds": odds
+        })
 
-    send_to_telegram("✅ Analyse terminée pour la Ligue des Champions et top ligues ESPN.")
+        combined_odds *= odds
 
-if __name__ == "__main__":
-    main()
+        if len(combined_bets) >= MAX_COMBINED:
+            break
+
+    if len(combined_bets) >= MAX_COMBINED:
+        break
+
+# ================= MESSAGE =================
+
+if not combined_bets:
+    send_telegram("❌ Aucun match fiable trouvé aujourd'hui.")
+else:
+    msg = "🔥 MULTI-PRONOSTIC PREMIUM 🔥\n\n"
+    for i, b in enumerate(combined_bets, 1):
+        msg += (
+            f"{i}️⃣ {b['match']}\n"
+            f"➡️ {b['pick']}\n"
+            f"🎯 Confiance : {b['confidence']}/10\n"
+            f"💰 Cote : {b['odds']}\n\n"
+        )
+
+    msg += f"📊 COTE TOTALE COMBINÉE : {round(combined_odds, 2)}\n"
+    msg += "⚠️ Mise responsable – Analyse IA\n"
+
+    send_telegram(msg)

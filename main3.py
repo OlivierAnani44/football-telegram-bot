@@ -21,11 +21,11 @@ if not BOT_TOKEN or not CHANNEL_ID:
 # =========================
 # Paramètres généraux
 # =========================
-MAX_DRAW_RISK = 1  # max 1 match nul par combiné RISK
+MAX_DRAW_RISK = 1
 LEAGUES = [
     "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
     "por.1", "ned.1", "uefa.champions", "uefa.europa"
-]  # toutes les ligues
+]
 TODAY = datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
 # =========================
@@ -54,92 +54,84 @@ def fetch_matches(league: str) -> List[Dict]:
 
 def analyze_match(event: Dict) -> Dict:
     """Analyse complète des statistiques d'un match domicile vs extérieur"""
-    home = event["competitions"][0]["competitors"][0]
-    away = event["competitions"][0]["competitors"][1]
+    try:
+        home = event["competitions"][0]["competitors"][0]
+        away = event["competitions"][0]["competitors"][1]
 
-    teamH = home["team"]["displayName"]
-    teamA = away["team"]["displayName"]
+        teamH = home["team"]["displayName"]
+        teamA = away["team"]["displayName"]
 
-    # Récupération des stats de base
-    stats_home = {s["name"]: float(s.get("value", 0)) for s in home.get("statistics", [])}
-    stats_away = {s["name"]: float(s.get("value", 0)) for s in away.get("statistics", [])}
+        # Récupération stats
+        stats_home = {s["name"]: float(s.get("value", 0)) for s in home.get("statistics", [])}
+        stats_away = {s["name"]: float(s.get("value", 0)) for s in away.get("statistics", [])}
 
-    # Comparaison statistique pour score global
-    scoreH = 0
-    scoreA = 0
-    weight = {
-        "goals": 2,
-        "shots": 1,
-        "shotsOnGoal": 1,
-        "possession": 0.5,
-        "corners": 0.5,
-        "fouls": -0.2,
-        "yellowCards": -0.1,
-        "redCards": -0.3,
-        "passes": 0.5,
-        "passPct": 0.5
-    }
+        # Comparaison statistique
+        scoreH, scoreA = 0, 0
+        weight = {
+            "goals": 2, "shots": 1, "shotsOnGoal": 1, "possession": 0.5,
+            "corners": 0.5, "fouls": -0.2, "yellowCards": -0.1,
+            "redCards": -0.3, "passes": 0.5, "passPct": 0.5
+        }
 
-    for k in weight.keys():
-        valH = stats_home.get(k, 0)
-        valA = stats_away.get(k, 0)
-        if k in ["fouls", "yellowCards", "redCards"]:
-            if valH < valA: scoreH += weight[k]
-            else: scoreA += weight[k]
-        else:
-            if valH > valA: scoreH += weight[k]
-            else: scoreA += weight[k]
+        for k in weight.keys():
+            valH = stats_home.get(k, 0)
+            valA = stats_away.get(k, 0)
+            if k in ["fouls", "yellowCards", "redCards"]:
+                if valH < valA: scoreH += weight[k]
+                else: scoreA += weight[k]
+            else:
+                if valH > valA: scoreH += weight[k]
+                else: scoreA += weight[k]
 
-    # Avantage domicile
-    scoreH += 0.5
+        scoreH += 0.5  # avantage domicile
+        total = scoreH + scoreA
+        prob_dom = scoreH / total if total else 0.5
+        prob_ext = scoreA / total if total else 0.5
+        prob_draw = max(0, 1 - (prob_dom + prob_ext))
 
-    # Probabilités
-    total = scoreH + scoreA
-    prob_dom = scoreH / total if total else 0.5
-    prob_ext = scoreA / total if total else 0.5
-    prob_draw = max(0, 1 - (prob_dom + prob_ext))
+        r = random.random()
+        pick = "Match nul"
+        if r < prob_dom:
+            pick = f"{teamH} gagne"
+        elif r < prob_dom + prob_ext:
+            pick = f"{teamA} gagne"
 
-    # Pronostic pondéré
-    r = random.random()
-    pick = "Match nul"
-    if r < prob_dom:
-        pick = f"{teamH} gagne"
-    elif r < prob_dom + prob_ext:
-        pick = f"{teamA} gagne"
+        confidence = round(max(prob_dom, prob_ext, prob_draw)*10, 1)
+        odds = round(1 / (max(prob_dom, prob_ext, prob_draw) + 0.01), 2)
 
-    # Confiance
-    confidence = round(max(prob_dom, prob_ext, prob_draw)*10, 1)
-    odds = round(1 / (max(prob_dom, prob_ext, prob_draw) + 0.01), 2)
+        detailed_stats = {}
+        for s in set(list(stats_home.keys()) + list(stats_away.keys())):
+            detailed_stats[s] = f"{stats_home.get(s, 'N/A')} - {stats_away.get(s, 'N/A')}"
 
-    # Statistiques détaillées
-    detailed_stats = {}
-    for s in set(list(stats_home.keys()) + list(stats_away.keys())):
-        detailed_stats[s] = f"{stats_home.get(s, 'N/A')} - {stats_away.get(s, 'N/A')}"
+        # Gestion sûre du nom de la ligue
+        league_name = event.get("league", {}).get("name") or event.get("leagueName", "Inconnue")
 
-    return {
-        "league": event["league"]["name"],
-        "teams": f"{teamH} vs {teamA}",
-        "score": f"{home.get('score', '0')} - {away.get('score', '0')}",
-        "stats": detailed_stats,
-        "pronostic": pick,
-        "confidence": confidence,
-        "odds": odds
-    }
+        return {
+            "league": league_name,
+            "teams": f"{teamH} vs {teamA}",
+            "score": f"{home.get('score', '0')} - {away.get('score', '0')}",
+            "stats": detailed_stats,
+            "pronostic": pick,
+            "confidence": confidence,
+            "odds": odds
+        }
+    except Exception as ex:
+        print(f"[ERROR] Analyse match échouée: {ex}")
+        return {}
 
 # =========================
-# Génération combinés MEDIUM et RISK
+# Génération combinés
 # =========================
 def generate_combinés(matches: List[Dict]):
-    risk_matches = []
-    medium_matches = []
+    risk_matches, medium_matches = [], []
     draw_count = 0
     for m in matches:
+        if not m: continue
         if "nul" in m["pronostic"].lower():
             if draw_count < MAX_DRAW_RISK:
                 risk_matches.append(m)
                 draw_count += 1
             else:
-                # Choisir équipe avec score le plus élevé
                 if m["stats"].get("goals", "0 - 0") != "0 - 0":
                     risk_matches.append(m)
         else:
@@ -158,8 +150,10 @@ def main():
         print(f"[INFO] {league} → {len(events)} matchs trouvés")
         for e in events:
             analyzed = analyze_match(e)
+            if not analyzed: continue
             all_matches.append(analyzed)
-            # Envoi individuel sur Telegram
+
+            # Envoi sur Telegram
             msg = f"🏆 {analyzed['league']}\n⚽ {analyzed['teams']}\n📊 Score : {analyzed['score']}\n\n📈 Statistiques :\n"
             for k,v in analyzed["stats"].items():
                 msg += f"{k}: {v}\n"
@@ -168,7 +162,6 @@ def main():
 
     # Génération combinés
     medium, risk = generate_combinés(all_matches)
-    # Message combiné RISK
     if risk:
         msg = "🔴 COMBINÉ RISK\n\n"
         for i, m in enumerate(risk,1):
@@ -179,7 +172,6 @@ def main():
         msg += f"📊 COTE TOTALE : {round(total_odds,2)}"
         send_telegram(msg)
 
-    # Message combiné MEDIUM
     if medium:
         msg = "🟢 COMBINÉ MEDIUM\n\n"
         for i, m in enumerate(medium,1):

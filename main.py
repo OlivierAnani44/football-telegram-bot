@@ -1,187 +1,208 @@
 import os
-import sys
-import requests
-import datetime
+import re
+import json
 import random
-from typing import Dict, List
+import feedparser
+import logging
+import aiohttp
+import asyncio
+from telegram import Bot
+from deep_translator import GoogleTranslator
 
-# =========================
-# Variables d'environnement
-# =========================
+# ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNELS = [ch.strip() for ch in os.getenv("CHANNELS", "").split(",") if ch.strip()]
+RSS_FEED = "https://feeds.bbci.co.uk/sport/football/rss.xml"
+TEMP_IMAGE_FILE = "/tmp/image.jpg"
+POSTED_FILE = "posted.json"
+POST_INTERVAL = 30 * 60  # 30 minutes
 
-print("DEBUG BOT_TOKEN:", "OK" if BOT_TOKEN else "MANQUANT")
-print("DEBUG CHANNEL_ID:", "OK" if CHANNEL_ID else "MANQUANT")
+# ---------------- LOGGING ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+bot = Bot(token=BOT_TOKEN)
 
-if not BOT_TOKEN or not CHANNEL_ID:
-    print("❌ Variables BOT_TOKEN ou CHANNEL_ID manquantes")
-    sys.exit(1)
-
-# =========================
-# Paramètres généraux
-# =========================
-MAX_DRAW_RISK = 1
-LEAGUES = [
-    "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
-    "por.1", "ned.1", "uefa.champions", "uefa.europa"
+# ---------------- VARIANTES ----------------
+TITLE_VARIANTS = [
+    "NOUVELLE FOOT", "INFO FOOT", "ACTUALITÉ FOOT", "FLASH FOOT",
+    "DERNIÈRE MINUTE FOOT", "ACTU FOOTBALL", "FOOT À LA UNE",
+    "LE POINT FOOT", "INFO MATCH", "RÉSUMÉ FOOT", "FOOT AUJOURD’HUI",
+    "ACTU MATCH", "FOOT AFRICAIN", "AFCON ACTUALITÉ", "FOOT INTERNATIONAL",
+    "LE FAIT DU JOUR FOOT", "ACTUALITÉ SPORT FOOT", "FLASH MATCH",
+    "FOOT EN DIRECT", "FOOT : L’ESSENTIEL"
 ]
-TODAY = datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-# =========================
-# Fonctions utilitaires
-# =========================
-def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHANNEL_ID, "text": message, "parse_mode": "HTML"}
-    resp = requests.post(url, data=data)
-    if resp.status_code != 200:
-        print(f"[TELEGRAM] status={resp.status_code} response={resp.text}")
-    else:
-        print(f"[TELEGRAM] Message envoyé: {message.splitlines()[0]}")
+HASHTAG_VARIANTS = [
+    "#Football", "#Foot", "#ActuFoot", "#InfoFoot", "#FootActu",
+    "#FootballAfricain", "#Afcon", "#FootInternational",
+    "#MatchDeFoot", "#FootAujourdHui", "#PassionFoot",
+    "#FansDeFoot", "#ActualiteSportive", "#FootNews",
+    "#FootAfrique", "#FootDuJour", "#ResumeFoot",
+    "#MondeDuFoot", "#FootLive", "#CultureFoot"
+]
 
-def fetch_matches(league: str) -> List[Dict]:
-    """Récupère tous les matchs de la journée pour une ligue"""
-    url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
-    resp = requests.get(url)
-    if resp.status_code != 200:
-        print(f"[ERROR] Impossible de récupérer {league}")
-        return []
-    data = resp.json()
-    events = data.get("events", [])
-    today_events = [e for e in events if e["date"].startswith(TODAY)]
-    return today_events
+COMMENT_VARIANTS = [
+    "💬 Qu’en pensez-vous ?", "🗣️ Donnez votre avis en commentaire",
+    "👇 Votre réaction nous intéresse", "⚽ Dites-nous ce que vous en pensez",
+    "🔥 Êtes-vous d’accord avec cette info ?", "📢 Débattons-en dans les commentaires",
+    "🤔 Bonne ou mauvaise nouvelle selon vous ?", "💭 Votre analyse en commentaire",
+    "📝 Partagez votre opinion", "🙌 On attend vos réactions",
+    "👀 Votre point de vue compte", "⚽ Fans de foot, à vous la parole",
+    "📣 Laissez votre avis", "🧠 Analysez cette actu avec nous",
+    "🔥 Réagissez maintenant", "👇 Dites-le-nous en commentaire",
+    "🎯 Quel est votre avis ?", "💬 On lit vos commentaires",
+    "⚽ Vous validez ou pas ?", "🗨️ Exprimez-vous !"
+]
 
-def analyze_match(event: Dict) -> Dict:
-    """Analyse complète des statistiques d'un match domicile vs extérieur"""
+# ---------------- JSON POSTÉS ----------------
+def load_posted():
+    if os.path.exists(POSTED_FILE):
+        with open(POSTED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+def save_posted(posted):
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(posted), f, ensure_ascii=False, indent=2)
+
+# ---------------- IMAGE ----------------
+def extract_image(entry):
+    if "media_content" in entry:
+        return entry.media_content[0].get("url")
+    if "media_thumbnail" in entry:
+        return entry.media_thumbnail[0].get("url")
+    html = entry.get("summary", "")
+    match = re.search(r'<img[^>]+src="([^">]+)"', html)
+    return match.group(1) if match else None
+
+async def download_image(url):
+    if not url:
+        return None
     try:
-        home = event["competitions"][0]["competitors"][0]
-        away = event["competitions"][0]["competitors"][1]
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    with open(TEMP_IMAGE_FILE, "wb") as f:
+                        f.write(await resp.read())
+                    return TEMP_IMAGE_FILE
+    except Exception as e:
+        logger.error(f"❌ Image error : {e}")
+    return None
 
-        teamH = home["team"]["displayName"]
-        teamA = away["team"]["displayName"]
+# ---------------- TRANSLATION ----------------
+async def translate(text):
+    try:
+        return GoogleTranslator(source="auto", target="fr").translate(text)
+    except Exception:
+        return text
 
-        # Récupération stats
-        stats_home = {s["name"]: float(s.get("value", 0)) for s in home.get("statistics", [])}
-        stats_away = {s["name"]: float(s.get("value", 0)) for s in away.get("statistics", [])}
+# ---------------- FORMAT MESSAGE ----------------
+def format_message(title, summary):
+    header = random.choice(TITLE_VARIANTS)
+    hashtags = " ".join(random.sample(HASHTAG_VARIANTS, 5))
+    comment = random.choice(COMMENT_VARIANTS)
+    return f"""
+🔥🔥 <b>{header} :</b> <i>{title}</i>
 
-        # Comparaison statistique
-        scoreH, scoreA = 0, 0
-        weight = {
-            "goals": 2, "shots": 1, "shotsOnGoal": 1, "possession": 0.5,
-            "corners": 0.5, "fouls": -0.2, "yellowCards": -0.1,
-            "redCards": -0.3, "passes": 0.5, "passPct": 0.5
-        }
+<blockquote>{summary}</blockquote>
 
-        for k in weight.keys():
-            valH = stats_home.get(k, 0)
-            valA = stats_away.get(k, 0)
-            if k in ["fouls", "yellowCards", "redCards"]:
-                if valH < valA: scoreH += weight[k]
-                else: scoreA += weight[k]
+{hashtags}
+
+<b>{comment}</b>
+""".strip()
+
+# ---------------- TRI INTELLIGENT ----------------
+def compute_importance(entry):
+    summary = re.sub("<.*?>", "", entry.get("summary", "")).lower()
+    title = entry.get("title", "").lower()
+
+    keywords_priority = {
+        "goal": 10,
+        "but": 10,
+        "score": 8,
+        "victoire": 8,
+        "défaite": 8,
+        "titre": 7,
+        "championnat": 6,
+        "afcon": 12,
+        "afrique": 10,
+        "international": 8,
+        "match important": 12,
+        "résultat": 7
+    }
+
+    score = len(summary.split())
+    for kw, val in keywords_priority.items():
+        if kw in summary or kw in title:
+            score += val
+
+    return score
+
+def select_most_important(entries, posted):
+    candidates = [e for e in entries if (e.get("id") or e.get("link") or e.get("title")) not in posted]
+    if not candidates:
+        return None
+    candidates.sort(key=compute_importance, reverse=True)
+    return candidates[0]
+
+# ---------------- POST ----------------
+async def post_entry(entry, posted):
+    title = await translate(entry.get("title", ""))
+    summary = await translate(re.sub("<.*?>", "", entry.get("summary", "")))
+    entry_id = entry.get("id") or entry.get("link") or title
+
+    if entry_id in posted:
+        return False
+
+    image_url = extract_image(entry)
+    image_path = await download_image(image_url)
+    message = format_message(title, summary)
+
+    for ch in CHANNELS:
+        try:
+            if image_path:
+                with open(image_path, "rb") as img:
+                    await bot.send_photo(
+                        chat_id=ch,
+                        photo=img,
+                        caption=message[:1024],
+                        parse_mode="HTML"
+                    )
             else:
-                if valH > valA: scoreH += weight[k]
-                else: scoreA += weight[k]
+                await bot.send_message(
+                    chat_id=ch,
+                    text=message,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+            logger.info(f"✅ Publié sur {ch} : {title}")
+        except Exception as e:
+            logger.error(f"❌ Telegram error : {e}")
 
-        scoreH += 0.5  # avantage domicile
-        total = scoreH + scoreA
-        prob_dom = scoreH / total if total else 0.5
-        prob_ext = scoreA / total if total else 0.5
-        prob_draw = max(0, 1 - (prob_dom + prob_ext))
+    posted.add(entry_id)
+    save_posted(posted)
+    return True
 
-        r = random.random()
-        pick = "Match nul"
-        if r < prob_dom:
-            pick = f"{teamH} gagne"
-        elif r < prob_dom + prob_ext:
-            pick = f"{teamA} gagne"
+# ---------------- MAIN LOOP ----------------
+async def main_loop():
+    posted = load_posted()
+    logger.info("🤖 Bot lancé et va poster un seul post toutes les 30 minutes")
 
-        confidence = round(max(prob_dom, prob_ext, prob_draw)*10, 1)
-        odds = round(1 / (max(prob_dom, prob_ext, prob_draw) + 0.01), 2)
+    while True:
+        feed = feedparser.parse(RSS_FEED)
+        entries = feed.entries[:30]
 
-        detailed_stats = {}
-        for s in set(list(stats_home.keys()) + list(stats_away.keys())):
-            detailed_stats[s] = f"{stats_home.get(s, 'N/A')} - {stats_away.get(s, 'N/A')}"
-
-        # Gestion sûre du nom de la ligue
-        league_name = event.get("league", {}).get("name") or event.get("leagueName", "Inconnue")
-
-        return {
-            "league": league_name,
-            "teams": f"{teamH} vs {teamA}",
-            "score": f"{home.get('score', '0')} - {away.get('score', '0')}",
-            "stats": detailed_stats,
-            "pronostic": pick,
-            "confidence": confidence,
-            "odds": odds
-        }
-    except Exception as ex:
-        print(f"[ERROR] Analyse match échouée: {ex}")
-        return {}
-
-# =========================
-# Génération combinés
-# =========================
-def generate_combinés(matches: List[Dict]):
-    risk_matches, medium_matches = [], []
-    draw_count = 0
-    for m in matches:
-        if not m: continue
-        if "nul" in m["pronostic"].lower():
-            if draw_count < MAX_DRAW_RISK:
-                risk_matches.append(m)
-                draw_count += 1
-            else:
-                if m["stats"].get("goals", "0 - 0") != "0 - 0":
-                    risk_matches.append(m)
+        post_to_send = select_most_important(entries, posted)
+        if post_to_send:
+            await post_entry(post_to_send, posted)
         else:
-            risk_matches.append(m)
-        if m["confidence"] >= 6:
-            medium_matches.append(m)
-    return medium_matches, risk_matches
+            logger.info("⚠️ Aucun nouveau post à publier")
 
-# =========================
-# Main
-# =========================
-def main():
-    all_matches = []
-    for league in LEAGUES:
-        events = fetch_matches(league)
-        print(f"[INFO] {league} → {len(events)} matchs trouvés")
-        for e in events:
-            analyzed = analyze_match(e)
-            if not analyzed: continue
-            all_matches.append(analyzed)
-
-            # Envoi sur Telegram
-            msg = f"🏆 {analyzed['league']}\n⚽ {analyzed['teams']}\n📊 Score : {analyzed['score']}\n\n📈 Statistiques :\n"
-            for k,v in analyzed["stats"].items():
-                msg += f"{k}: {v}\n"
-            msg += f"\n🔮 Pronostic : {analyzed['pronostic']}\n🎯 Confiance : {analyzed['confidence']}/10\n💰 Cote estimée : {analyzed['odds']}"
-            send_telegram(msg)
-
-    # Génération combinés
-    medium, risk = generate_combinés(all_matches)
-    if risk:
-        msg = "🔴 COMBINÉ RISK\n\n"
-        for i, m in enumerate(risk,1):
-            msg += f"{i}️⃣ {m['teams']}\n➡️ {m['pronostic']}\n🎯 Confiance : {m['confidence']}/10\n💰 Cote : {m['odds']}\n\n"
-        total_odds = 1
-        for m in risk:
-            total_odds *= m['odds']
-        msg += f"📊 COTE TOTALE : {round(total_odds,2)}"
-        send_telegram(msg)
-
-    if medium:
-        msg = "🟢 COMBINÉ MEDIUM\n\n"
-        for i, m in enumerate(medium,1):
-            msg += f"{i}️⃣ {m['teams']}\n➡️ {m['pronostic']}\n🎯 Confiance : {m['confidence']}/10\n💰 Cote : {m['odds']}\n\n"
-        total_odds = 1
-        for m in medium:
-            total_odds *= m['odds']
-        msg += f"📊 COTE TOTALE : {round(total_odds,2)}"
-        send_telegram(msg)
+        logger.info(f"⏳ Attente de {POST_INTERVAL//60} minutes avant le prochain post")
+        await asyncio.sleep(POST_INTERVAL)
 
 if __name__ == "__main__":
-    print("🚀 Bot démarré")
-    main()
+    asyncio.run(main_loop())

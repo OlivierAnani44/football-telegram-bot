@@ -2,18 +2,12 @@ import os
 import requests
 from understatapi import UnderstatClient
 
-# =============================
-# VARIABLES ENVIRONNEMENT
-# =============================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise RuntimeError("BOT_TOKEN ou CHANNEL_ID manquant")
 
-# =============================
-# FONCTION TELEGRAM
-# =============================
 def send_to_telegram(msg: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -28,11 +22,8 @@ def send_to_telegram(msg: str):
     else:
         print("Message envoyé:", msg[:50], "...")
 
-# =============================
-# PROGRAMME PRINCIPAL
-# =============================
 def main():
-    season = "2024"  # Saison passée : La Liga 2024/25
+    season = "2024"  # Saison passée La Liga 2024/25
 
     with UnderstatClient() as client:
         league = client.league("La_Liga")
@@ -44,21 +35,22 @@ def main():
 
         print(f"{len(matches)} matchs récupérés pour La Liga {season}\n")
 
-        # Boucle sur les derniers matchs (ou tous)
-        for match in matches[:10]:  # 10 premiers matchs à titre d'exemple
+        for match in matches[:10]:  # Exemple : 10 premiers matchs
             home = match["h"]["title"]
             away = match["a"]["title"]
-            goals_home = match["goals"]["h"]
-            goals_away = match["goals"]["a"]
-            xG_home = float(match["xG"]["h"])
-            xG_away = float(match["xG"]["a"])
-            shots_home = int(match["shots"]["h"])
-            shots_away = int(match["shots"]["a"])
-            possession_home = float(match["possession"]["h"])
-            possession_away = float(match["possession"]["a"])
-            date_utc = match["datetime"]
+            goals_home = match.get("goals", {}).get("h", "-")
+            goals_away = match.get("goals", {}).get("a", "-")
+            xG_home = float(match.get("xG", {}).get("h", 0))
+            xG_away = float(match.get("xG", {}).get("a", 0))
 
-            # Préparer le message
+            # Vérifie la présence de shots et possession
+            shots_home = int(match.get("shots", {}).get("h", 0))
+            shots_away = int(match.get("shots", {}).get("a", 0))
+            possession_home = float(match.get("possession", {}).get("h", 0))
+            possession_away = float(match.get("possession", {}).get("a", 0))
+
+            date_utc = match.get("datetime", "N/A")
+
             msg = (
                 f"⚽ <b>{home} vs {away}</b>\n"
                 f"Date UTC: {date_utc}\n"
@@ -66,7 +58,6 @@ def main():
                 f"Tirs: {shots_home}-{shots_away} | Possession: {possession_home:.1f}% - {possession_away:.1f}%"
             )
 
-            # Envoyer sur Telegram
             send_to_telegram(msg)
 
 if __name__ == "__main__":

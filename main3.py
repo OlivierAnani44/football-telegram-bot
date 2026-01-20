@@ -7,7 +7,6 @@ from datetime import datetime
 # =============================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-SEASON = 2025  # Saison exemple OpenLigaDB
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise RuntimeError("BOT_TOKEN ou CHANNEL_ID manquant")
@@ -21,24 +20,7 @@ def send_to_telegram(message: str):
     requests.post(url, data=payload, timeout=15)
 
 # =============================
-# OPENLIGADB - LIGUES
-# =============================
-OPENLIGA_BASE = "https://api.openligadb.de"
-
-def fetch_openliga_leagues():
-    try:
-        return requests.get(f"{OPENLIGA_BASE}/getavailableleagues", timeout=20).json()
-    except:
-        return []
-
-def fetch_openliga_matches(league_shortcut):
-    try:
-        return requests.get(f"{OPENLIGA_BASE}/getmatchdata/{league_shortcut}/{SEASON}", timeout=20).json()
-    except:
-        return []
-
-# =============================
-# ESPN - MATCHS DU JOUR
+# ESPN - TOP LIGUES & CHAMPIONS LEAGUE
 # =============================
 ESPN_BASE = "http://site.api.espn.com/apis/site/v2/sports"
 
@@ -51,6 +33,9 @@ TOP_LEAGUES = {
     "Ligue 1": "soccer/fra.1"
 }
 
+# =============================
+# Récupérer les matchs du jour
+# =============================
 def fetch_espn_today_matches(league_api):
     today = datetime.utcnow().strftime("%Y%m%d")
     url = f"{ESPN_BASE}/{league_api}/scoreboard?dates={today}"
@@ -61,134 +46,78 @@ def fetch_espn_today_matches(league_api):
         return []
 
 # =============================
-# SCORE
+# Récupérer les statistiques détaillées d’un match
 # =============================
-def get_score(match):
-    if "MatchResults" in match and match["MatchResults"]:
-        r = match["MatchResults"][-1]
-        return f'{r["PointsTeam1"]}-{r["PointsTeam2"]}'
-    elif "competitions" in match and match["competitions"]:
+def fetch_match_stats(league_api, game_id):
+    url = f"{ESPN_BASE}/{league_api}/summary?event={game_id}"
+    try:
+        res = requests.get(url, timeout=20).json()
+        stats = {}
+        # Extraire stats principales
+        if "boxscore" in res:
+            teams = res["boxscore"].get("teams", [])
+            for t in teams:
+                team_name = t["team"]["displayName"]
+                team_stats = {}
+                for s in t.get("statistics", []):
+                    team_stats[s["name"]] = s.get("displayValue", "N/A")
+                stats[team_name] = team_stats
+        return stats
+    except:
+        return {}
+
+# =============================
+# Formater message Telegram avec stats
+# =============================
+def format_espn_match_message(match, league_api):
+    try:
         comp = match["competitions"][0]
-        if "competitors" in comp:
-            try:
-                home = comp["competitors"][0]["score"]
-                away = comp["competitors"][1]["score"]
-                return f"{home}-{away}"
-            except:
-                return "Non joué"
-    return "Non joué"
+        team1 = comp["competitors"][0]["team"]["displayName"]
+        team2 = comp["competitors"][1]["team"]["displayName"]
+        score = comp["competitors"][0]["score"] + "-" + comp["competitors"][1]["score"]
 
-# =============================
-# H2H et forme
-# =============================
-def get_h2h(team1, team2, all_matches, limit=5):
-    h2h = []
-    for m in reversed(all_matches):
-        t1 = m["Team1"]["TeamName"]
-        t2 = m["Team2"]["TeamName"]
-        if {t1, t2} == {team1, team2} and m.get("MatchResults"):
-            r = m["MatchResults"][-1]
-            h2h.append(f"{t1} {r['PointsTeam1']}-{r['PointsTeam2']} {t2}")
-            if len(h2h) >= limit:
-                break
-    return h2h if h2h else ["Aucun historique"]
+        # Récupérer stats détaillées
+        stats = fetch_match_stats(league_api, match["id"])
 
-def get_form(team, all_matches, limit=5):
-    form = []
-    for m in reversed(all_matches):
-        if m.get("MatchResults"):
-            t1 = m["Team1"]["TeamName"]
-            t2 = m["Team2"]["TeamName"]
-            r = m["MatchResults"][-1]
-            if team == t1:
-                form.append("V" if r["PointsTeam1"] > r["PointsTeam2"] else
-                            "N" if r["PointsTeam1"] == r["PointsTeam2"] else "D")
-            elif team == t2:
-                form.append("V" if r["PointsTeam2"] > r["PointsTeam1"] else
-                            "N" if r["PointsTeam1"] == r["PointsTeam2"] else "D")
-            if len(form) >= limit:
-                break
-    return " ".join(form) if form else "N/A"
+        stats_text = ""
+        if stats:
+            t1_stats = stats.get(team1, {})
+            t2_stats = stats.get(team2, {})
+            all_keys = set(list(t1_stats.keys()) + list(t2_stats.keys()))
+            for k in all_keys:
+                stats_text += f"{k}: {t1_stats.get(k,'N/A')} - {t2_stats.get(k,'N/A')}\n"
 
-def predict_winner(team1, team2, all_matches):
-    f1 = get_form(team1, all_matches)
-    f2 = get_form(team2, all_matches)
-    score1 = f1.count("V")
-    score2 = f2.count("V")
-    if score1 > score2:
-        return f"Avantage : {team1}"
-    elif score2 > score1:
-        return f"Avantage : {team2}"
-    return "Match équilibré"
-
-def format_match_message(match, all_matches, league_name, team1, team2, score):
-    h2h = "\n".join(get_h2h(team1, team2, all_matches))
-    form1 = get_form(team1, all_matches)
-    form2 = get_form(team2, all_matches)
-    prediction = predict_winner(team1, team2, all_matches)
-
-    return f"""
-🏆 {league_name}
+        message = f"""
+🏆 {league_api.replace('soccer/', '')}
 ⚽ {team1} vs {team2}
 📊 Score : {score}
 
-🔁 H2H :
-{h2h}
+📈 Statistiques :
+{stats_text.strip() if stats_text else 'Non disponible'}
 
-📈 Forme récente :
-{team1} : {form1}
-{team2} : {form2}
-
-🔮 Analyse :
-{prediction}
+🔮 Analyse simple :
+Avantage probable : {'Équilibré' if not stats else 'À définir selon stats'}
 """.strip()
+        return message
+    except:
+        return None
 
 # =============================
 # MAIN
 # =============================
 def main():
-    # 1️⃣ OpenLigaDB - toutes les ligues
-    leagues = fetch_openliga_leagues()
-    for league in leagues:
-        league_name = league.get("LeagueName") or league.get("LeagueShortName") or league.get("LeagueShortcut")
-        league_shortcut = league.get("LeagueShortcut") or league.get("LeagueId")
-        if not league_name or not league_shortcut:
+    for league_name, league_api in TOP_LEAGUES.items():
+        matches = fetch_espn_today_matches(league_api)
+        if not matches:
             continue
 
-        all_matches = fetch_openliga_matches(league_shortcut)
-        if not all_matches:
-            continue
-
-        send_to_telegram(f"🏆 {league_name} – Saison {SEASON}")
-        for match in all_matches:
-            try:
-                team1 = match["Team1"]["TeamName"]
-                team2 = match["Team2"]["TeamName"]
-                score = get_score(match)
-                msg = format_match_message(match, all_matches, league_name, team1, team2, score)
+        send_to_telegram(f"🏆 {league_name} – Matchs du jour")
+        for match in matches:
+            msg = format_espn_match_message(match, league_api)
+            if msg:
                 send_to_telegram(msg)
-            except:
-                continue
 
-    # 2️⃣ ESPN - Top ligues et CL pour aujourd'hui
-    for league_name, api_path in TOP_LEAGUES.items():
-        espn_matches = fetch_espn_today_matches(api_path)
-        if not espn_matches:
-            continue
-
-        send_to_telegram(f"🏆 {league_name} – Matchs du jour (ESPN)")
-        for m in espn_matches:
-            try:
-                comp = m["competitions"][0]
-                team1 = comp["competitors"][0]["team"]["displayName"]
-                team2 = comp["competitors"][1]["team"]["displayName"]
-                score = get_score(m)
-                msg = f"⚽ {team1} vs {team2}\n📊 Score : {score}"
-                send_to_telegram(msg)
-            except:
-                continue
-
-    send_to_telegram("✅ Analyse terminée pour toutes les ligues et top matchs ESPN.")
+    send_to_telegram("✅ Analyse terminée pour la Ligue des Champions et top ligues ESPN.")
 
 if __name__ == "__main__":
     main()

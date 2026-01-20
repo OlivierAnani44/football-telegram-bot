@@ -1,13 +1,16 @@
-import requests
-import datetime
 import os
 import sys
+import requests
+import datetime
+import random
+from typing import Dict, List
 
-# ================= ENV =================
+# =========================
+# Variables d'environnement
+# =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# debug pour confirmer que les variables existent
 print("DEBUG BOT_TOKEN:", "OK" if BOT_TOKEN else "MANQUANT")
 print("DEBUG CHANNEL_ID:", "OK" if CHANNEL_ID else "MANQUANT")
 
@@ -15,156 +18,178 @@ if not BOT_TOKEN or not CHANNEL_ID:
     print("❌ Variables BOT_TOKEN ou CHANNEL_ID manquantes")
     sys.exit(1)
 
-# ================= CONFIG =================
+# =========================
+# Paramètres généraux
+# =========================
+MAX_DRAW_RISK = 1  # max 1 match nul par combiné RISK
 LEAGUES = [
-    "uefa.champions",
-    "eng.1",
-    "esp.1",
-    "ita.1",
-    "ger.1",
-    "fra.1",
-    "por.1",
-    "ned.1"
-]
+    "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
+    "por.1", "ned.1", "uefa.champions", "uefa.europa"
+]  # toutes les ligues
+TODAY = datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
-BIG_TEAMS = [
-    "Real Madrid", "Barcelona", "Manchester City", "Bayern Munich",
-    "Paris Saint-Germain", "Liverpool", "Arsenal", "Inter",
-    "Juventus", "AC Milan", "Chelsea", "Borussia Dortmund"
-]
-
-# ================= UTILS =================
-def log(msg):
-    print(msg)
-    sys.stdout.flush()
-
-def send_telegram(message):
+# =========================
+# Fonctions utilitaires
+# =========================
+def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": CHANNEL_ID,
-        "text": message
-    })
-    log(f"[TELEGRAM] status={r.status_code} response={r.text}")
-
-def get_matches_today(league):
-    today = datetime.date.today().strftime("%Y%m%d")
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard?dates={today}"
-    try:
-        data = requests.get(url, timeout=10).json()
-        events = data.get("events", [])
-        log(f"[INFO] {league} → {len(events)} matchs trouvés")
-        return events
-    except Exception as e:
-        log(f"[ERROR] {league} → {e}")
-        return []
-
-def get_team_form(team_id, league):
-    url = f"https://site.web.api.espn.com/apis/site/v2/sports/soccer/{league}/teams/{team_id}/schedule"
-    wins = draws = losses = gf = ga = 0
-    try:
-        data = requests.get(url, timeout=10).json()
-        for e in data.get("events", [])[:5]:
-            comp = e["competitions"][0]["competitors"]
-            h, a = comp[0], comp[1]
-            if h["id"] == team_id:
-                sf, sa = int(h.get("score", 0)), int(a.get("score", 0))
-            else:
-                sf, sa = int(a.get("score", 0)), int(h.get("score", 0))
-            gf += sf
-            ga += sa
-            if sf > sa:
-                wins += 1
-            elif sf < sa:
-                losses += 1
-            else:
-                draws += 1
-    except:
-        pass
-    return {"wins": wins, "draws": draws, "losses": losses, "gf": gf, "ga": ga}
-
-def predict(teamH, teamA, formH, formA):
-    """
-    Predict avec logique améliorée pour MEDIUM et RISK
-    """
-    score = 5
-    score += (formH["wins"] - formA["wins"]) * 0.7
-    score += ((formH["gf"] - formH["ga"]) - (formA["gf"] - formA["ga"])) * 0.3
-    score += 0.8  # avantage domicile
-    if teamH in BIG_TEAMS:
-        score += 0.7
-    if teamA in BIG_TEAMS:
-        score -= 0.7
-
-    confidence = round(max(3, min(9, score)), 1)
-
-    # logique combiné
-    pick = ""
-    if confidence >= 6:
-        pick = f"{teamH} gagne"
-    elif confidence <= 4:
-        pick = f"{teamA} gagne"
+    data = {"chat_id": CHANNEL_ID, "text": message, "parse_mode": "HTML"}
+    resp = requests.post(url, data=data)
+    if resp.status_code != 200:
+        print(f"[TELEGRAM] status={resp.status_code} response={resp.text}")
     else:
-        # match équilibré → peut être nul ou over
-        # ajout de variation RISK
-        pick_options = ["Match nul", f"{teamH} gagne", f"{teamA} gagne"]
-        # on favorise le nul max 1 par combiné
-        pick = pick_options[0]  # default nul
-    odds = round(1 / (confidence / 10), 2)
-    return pick, confidence, odds
+        print(f"[TELEGRAM] Message envoyé: {message.splitlines()[0]}")
 
-# ================= MAIN =================
-log("🚀 Bot démarré")
-send_telegram("✅ Bot pronostics actif")
+def fetch_matches(league: str) -> List[Dict]:
+    """Récupère tous les matchs de la journée pour une ligue"""
+    url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        print(f"[ERROR] Impossible de récupérer {league}")
+        return []
+    data = resp.json()
+    events = data.get("events", [])
+    today_events = [e for e in events if e["date"].startswith(TODAY)]
+    return today_events
 
-medium = []
-risk = []
-draws_risk_count = 0
-MAX_DRAWS_RISK = 1
+def analyze_match(event: Dict) -> Dict:
+    """Analyse complète des statistiques d'un match domicile vs extérieur"""
+    home = event["competitions"][0]["competitors"][0]
+    away = event["competitions"][0]["competitors"][1]
 
-for league in LEAGUES:
-    events = get_matches_today(league)
-    for m in events:
-        comp = m["competitions"][0]
-        h, a = comp["competitors"]
-        teamH = h["team"]["displayName"]
-        teamA = a["team"]["displayName"]
-        formH = get_team_form(h["team"]["id"], league)
-        formA = get_team_form(a["team"]["id"], league)
+    teamH = home["team"]["displayName"]
+    teamA = away["team"]["displayName"]
 
-        pick, conf, odds = predict(teamH, teamA, formH, formA)
+    # Récupération des stats de base
+    stats_home = {s["name"]: float(s.get("value", 0)) for s in home.get("statistics", [])}
+    stats_away = {s["name"]: float(s.get("value", 0)) for s in away.get("statistics", [])}
 
-        # logic anti-match nul RISK
-        if "nul" in pick.lower() and draws_risk_count >= MAX_DRAWS_RISK:
-            if conf > 5:
-                pick = f"{teamH} gagne"
+    # Comparaison statistique pour score global
+    scoreH = 0
+    scoreA = 0
+    weight = {
+        "goals": 2,
+        "shots": 1,
+        "shotsOnGoal": 1,
+        "possession": 0.5,
+        "corners": 0.5,
+        "fouls": -0.2,
+        "yellowCards": -0.1,
+        "redCards": -0.3,
+        "passes": 0.5,
+        "passPct": 0.5
+    }
+
+    for k in weight.keys():
+        valH = stats_home.get(k, 0)
+        valA = stats_away.get(k, 0)
+        if k in ["fouls", "yellowCards", "redCards"]:
+            if valH < valA: scoreH += weight[k]
+            else: scoreA += weight[k]
+        else:
+            if valH > valA: scoreH += weight[k]
+            else: scoreA += weight[k]
+
+    # Avantage domicile
+    scoreH += 0.5
+
+    # Probabilités
+    total = scoreH + scoreA
+    prob_dom = scoreH / total if total else 0.5
+    prob_ext = scoreA / total if total else 0.5
+    prob_draw = max(0, 1 - (prob_dom + prob_ext))
+
+    # Pronostic pondéré
+    r = random.random()
+    pick = "Match nul"
+    if r < prob_dom:
+        pick = f"{teamH} gagne"
+    elif r < prob_dom + prob_ext:
+        pick = f"{teamA} gagne"
+
+    # Confiance
+    confidence = round(max(prob_dom, prob_ext, prob_draw)*10, 1)
+    odds = round(1 / (max(prob_dom, prob_ext, prob_draw) + 0.01), 2)
+
+    # Statistiques détaillées
+    detailed_stats = {}
+    for s in set(list(stats_home.keys()) + list(stats_away.keys())):
+        detailed_stats[s] = f"{stats_home.get(s, 'N/A')} - {stats_away.get(s, 'N/A')}"
+
+    return {
+        "league": event["league"]["name"],
+        "teams": f"{teamH} vs {teamA}",
+        "score": f"{home.get('score', '0')} - {away.get('score', '0')}",
+        "stats": detailed_stats,
+        "pronostic": pick,
+        "confidence": confidence,
+        "odds": odds
+    }
+
+# =========================
+# Génération combinés MEDIUM et RISK
+# =========================
+def generate_combinés(matches: List[Dict]):
+    risk_matches = []
+    medium_matches = []
+    draw_count = 0
+    for m in matches:
+        if "nul" in m["pronostic"].lower():
+            if draw_count < MAX_DRAW_RISK:
+                risk_matches.append(m)
+                draw_count += 1
             else:
-                pick = f"{teamA} gagne"
-        if "nul" in pick.lower():
-            draws_risk_count += 1
+                # Choisir équipe avec score le plus élevé
+                if m["stats"].get("goals", "0 - 0") != "0 - 0":
+                    risk_matches.append(m)
+        else:
+            risk_matches.append(m)
+        if m["confidence"] >= 6:
+            medium_matches.append(m)
+    return medium_matches, risk_matches
 
-        log(f"[MATCH] {teamH} vs {teamA} → {conf} → {pick}")
+# =========================
+# Main
+# =========================
+def main():
+    all_matches = []
+    for league in LEAGUES:
+        events = fetch_matches(league)
+        print(f"[INFO] {league} → {len(events)} matchs trouvés")
+        for e in events:
+            analyzed = analyze_match(e)
+            all_matches.append(analyzed)
+            # Envoi individuel sur Telegram
+            msg = f"🏆 {analyzed['league']}\n⚽ {analyzed['teams']}\n📊 Score : {analyzed['score']}\n\n📈 Statistiques :\n"
+            for k,v in analyzed["stats"].items():
+                msg += f"{k}: {v}\n"
+            msg += f"\n🔮 Pronostic : {analyzed['pronostic']}\n🎯 Confiance : {analyzed['confidence']}/10\n💰 Cote estimée : {analyzed['odds']}"
+            send_telegram(msg)
 
-        if conf >= 6 and len(medium) < 3:
-            medium.append((teamH, teamA, pick, conf, odds))
-        if conf >= 5 and len(risk) < 5:
-            risk.append((teamH, teamA, pick, conf, odds))
+    # Génération combinés
+    medium, risk = generate_combinés(all_matches)
+    # Message combiné RISK
+    if risk:
+        msg = "🔴 COMBINÉ RISK\n\n"
+        for i, m in enumerate(risk,1):
+            msg += f"{i}️⃣ {m['teams']}\n➡️ {m['pronostic']}\n🎯 Confiance : {m['confidence']}/10\n💰 Cote : {m['odds']}\n\n"
+        total_odds = 1
+        for m in risk:
+            total_odds *= m['odds']
+        msg += f"📊 COTE TOTALE : {round(total_odds,2)}"
+        send_telegram(msg)
 
-# ================= SEND =================
-def send_combo(title, bets):
-    if not bets:
-        return
-    total = 1
-    msg = f"{title}\n\n"
-    for i, b in enumerate(bets, 1):
-        total *= b[4]
-        msg += (
-            f"{i}️⃣ {b[0]} vs {b[1]}\n"
-            f"➡️ {b[2]}\n"
-            f"🎯 Confiance : {b[3]}/10\n"
-            f"💰 Cote : {b[4]}\n\n"
-        )
-    msg += f"📊 COTE TOTALE : {round(total, 2)}"
-    send_telegram(msg)
+    # Message combiné MEDIUM
+    if medium:
+        msg = "🟢 COMBINÉ MEDIUM\n\n"
+        for i, m in enumerate(medium,1):
+            msg += f"{i}️⃣ {m['teams']}\n➡️ {m['pronostic']}\n🎯 Confiance : {m['confidence']}/10\n💰 Cote : {m['odds']}\n\n"
+        total_odds = 1
+        for m in medium:
+            total_odds *= m['odds']
+        msg += f"📊 COTE TOTALE : {round(total_odds,2)}"
+        send_telegram(msg)
 
-send_combo("🔵 COMBINÉ MEDIUM", medium)
-send_combo("🔴 COMBINÉ RISK", risk)
+if __name__ == "__main__":
+    print("🚀 Bot démarré")
+    main()

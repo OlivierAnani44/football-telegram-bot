@@ -1,6 +1,7 @@
 import requests
 import datetime
 import math
+import sys
 
 # ================= CONFIG =================
 
@@ -18,24 +19,33 @@ LEAGUES = [
     "ned.1"
 ]
 
-MIN_CONFIDENCE = 6        # filtre bookmaker
-MAX_COMBINED = 5          # nombre max de matchs dans le combiné
+MIN_CONFIDENCE = 6
+MAX_COMBINED = 5
 
 # ==========================================
 
+def log(msg):
+    print(msg)
+    sys.stdout.flush()
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={
+    r = requests.post(url, json={
         "chat_id": CHANNEL_ID,
         "text": message
     })
+    log(f"[TELEGRAM] status={r.status_code} response={r.text}")
 
 def get_matches_today(league):
     today = datetime.date.today().strftime("%Y%m%d")
     url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard?dates={today}"
     try:
-        return requests.get(url, timeout=10).json().get("events", [])
-    except:
+        data = requests.get(url, timeout=10).json()
+        events = data.get("events", [])
+        log(f"[INFO] {league} → {len(events)} matchs trouvés")
+        return events
+    except Exception as e:
+        log(f"[ERROR] {league} récupération échouée : {e}")
         return []
 
 def get_team_form(team_id, league):
@@ -65,13 +75,7 @@ def get_team_form(team_id, league):
     except:
         pass
 
-    return {
-        "wins": wins,
-        "draws": draws,
-        "losses": losses,
-        "gf": gf,
-        "ga": ga
-    }
+    return {"wins": wins, "draws": draws, "losses": losses, "gf": gf, "ga": ga}
 
 def compute_power(form, home=False):
     score = (
@@ -83,12 +87,12 @@ def compute_power(form, home=False):
         score += 0.5
     return score
 
-def predict_match(teamH, teamA, formH, formA):
+def predict(teamH, teamA, formH, formA):
     sH = compute_power(formH, home=True)
     sA = compute_power(formA)
 
     diff = sH - sA
-    confidence = min(10, max(1, abs(diff)))
+    confidence = round(min(10, max(1, abs(diff))), 2)
 
     if diff > 1:
         pick = f"{teamH} gagne"
@@ -97,65 +101,60 @@ def predict_match(teamH, teamA, formH, formA):
     else:
         pick = "Match nul"
 
-    probability = confidence / 10
-    odds = round(1 / probability, 2)
-
+    odds = round(1 / (confidence / 10), 2)
     return pick, confidence, odds
 
-# ================== MAIN ==================
+# ================= MAIN =================
 
-combined_bets = []
-combined_odds = 1.0
+log("🚀 Bot démarré")
+send_telegram("✅ Bot pronostic lancé avec debug actif")
+
+combined = []
+total_odds = 1.0
 
 for league in LEAGUES:
     matches = get_matches_today(league)
 
-    for match in matches:
-        comp = match["competitions"][0]
-        home, away = comp["competitors"]
+    for m in matches:
+        comp = m["competitions"][0]
+        h, a = comp["competitors"]
 
-        teamH = home["team"]["displayName"]
-        teamA = away["team"]["displayName"]
+        teamH = h["team"]["displayName"]
+        teamA = a["team"]["displayName"]
 
-        formH = get_team_form(home["team"]["id"], league)
-        formA = get_team_form(away["team"]["id"], league)
+        formH = get_team_form(h["team"]["id"], league)
+        formA = get_team_form(a["team"]["id"], league)
 
-        pick, confidence, odds = predict_match(teamH, teamA, formH, formA)
+        pick, conf, odds = predict(teamH, teamA, formH, formA)
 
-        if confidence < MIN_CONFIDENCE:
+        log(f"[MATCH] {teamH} vs {teamA} → confiance {conf}")
+
+        if conf < MIN_CONFIDENCE:
+            log("⛔ rejeté (confiance insuffisante)")
             continue
 
-        combined_bets.append({
-            "league": league,
-            "match": f"{teamH} vs {teamA}",
-            "pick": pick,
-            "confidence": confidence,
-            "odds": odds
-        })
+        combined.append((teamH, teamA, pick, conf, odds))
+        total_odds *= odds
 
-        combined_odds *= odds
-
-        if len(combined_bets) >= MAX_COMBINED:
+        if len(combined) >= MAX_COMBINED:
             break
 
-    if len(combined_bets) >= MAX_COMBINED:
+    if len(combined) >= MAX_COMBINED:
         break
 
-# ================= MESSAGE =================
+log(f"[INFO] Matchs retenus : {len(combined)}")
 
-if not combined_bets:
-    send_telegram("❌ Aucun match fiable trouvé aujourd'hui.")
+if not combined:
+    send_telegram("❌ Aucun match assez fiable aujourd’hui (debug OK).")
 else:
     msg = "🔥 MULTI-PRONOSTIC PREMIUM 🔥\n\n"
-    for i, b in enumerate(combined_bets, 1):
+    for i, c in enumerate(combined, 1):
         msg += (
-            f"{i}️⃣ {b['match']}\n"
-            f"➡️ {b['pick']}\n"
-            f"🎯 Confiance : {b['confidence']}/10\n"
-            f"💰 Cote : {b['odds']}\n\n"
+            f"{i}️⃣ {c[0]} vs {c[1]}\n"
+            f"➡️ {c[2]}\n"
+            f"🎯 Confiance : {c[3]}/10\n"
+            f"💰 Cote : {c[4]}\n\n"
         )
 
-    msg += f"📊 COTE TOTALE COMBINÉE : {round(combined_odds, 2)}\n"
-    msg += "⚠️ Mise responsable – Analyse IA\n"
-
+    msg += f"📊 COTE TOTALE : {round(total_odds, 2)}"
     send_telegram(msg)

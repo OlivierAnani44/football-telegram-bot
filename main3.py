@@ -3,22 +3,22 @@ import datetime
 import os
 import sys
 import statistics
+import math
 from typing import List, Dict, Any, Tuple
 from dataclasses import dataclass
-from openai import OpenAI
 
 # ================= ENV =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 # Vérification des variables d'environnement
 print("DEBUG BOT_TOKEN:", "OK" if BOT_TOKEN else "MANQUANT")
 print("DEBUG CHANNEL_ID:", "OK" if CHANNEL_ID else "MANQUANT")
-print("DEBUG DEEPSEEK_API_KEY:", "OK" if DEEPSEEK_API_KEY else "MANQUANT")
+print("DEBUG DEEPSEEK_API_KEY:", "OK" if DEEPSEEK_API_KEY else "MANQUANT - Utilisation de l'analyse locale")
 
-if not BOT_TOKEN or not CHANNEL_ID or not DEEPSEEK_API_KEY:
-    print("❌ Variables BOT_TOKEN, CHANNEL_ID ou DEEPSEEK_API_KEY manquantes")
+if not BOT_TOKEN or not CHANNEL_ID:
+    print("❌ Variables BOT_TOKEN ou CHANNEL_ID manquantes")
     sys.exit(1)
 
 # ================= CONFIG =================
@@ -39,6 +39,15 @@ BIG_TEAMS = [
     "Juventus", "AC Milan", "Chelsea", "Borussia Dortmund"
 ]
 
+# Facteurs de pondération pour l'analyse locale
+WEIGHTS = {
+    "home_advantage": 1.2,
+    "big_team": 0.8,
+    "form_recent": 1.5,
+    "goals_difference": 0.3,
+    "champions_league": 0.9  # Réduit les nuls en Champions
+}
+
 # ================= DATA CLASSES =================
 @dataclass
 class TeamForm:
@@ -49,15 +58,29 @@ class TeamForm:
     ga: int
     matches_analyzed: int
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "wins": self.wins,
-            "draws": self.draws,
-            "losses": self.losses,
-            "goals_for": self.gf,
-            "goals_against": self.ga,
-            "matches_analyzed": self.matches_analyzed
-        }
+    @property
+    def points_per_game(self) -> float:
+        if self.matches_analyzed == 0:
+            return 1.5  # Moyenne par défaut
+        return (self.wins * 3 + self.draws) / self.matches_analyzed
+    
+    @property
+    def goal_difference_per_game(self) -> float:
+        if self.matches_analyzed == 0:
+            return 0.0
+        return (self.gf - self.ga) / self.matches_analyzed
+    
+    @property
+    def attack_strength(self) -> float:
+        if self.matches_analyzed == 0:
+            return 1.5
+        return self.gf / self.matches_analyzed
+    
+    @property
+    def defense_strength(self) -> float:
+        if self.matches_analyzed == 0:
+            return 1.5
+        return self.ga / self.matches_analyzed
 
 @dataclass
 class MatchPrediction:
@@ -68,6 +91,7 @@ class MatchPrediction:
     odds: float
     analysis_text: str
     league: str
+    score_probable: str
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -77,7 +101,8 @@ class MatchPrediction:
             "confidence": self.confidence,
             "odds": self.odds,
             "analysis": self.analysis_text,
-            "league": self.league
+            "league": self.league,
+            "score": self.score_probable
         }
     
     def get_pick_text(self) -> str:
@@ -98,17 +123,34 @@ def send_telegram(message: str) -> bool:
     """Send message to Telegram channel"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
+        # Échapper les caractères HTML problématiques
+        safe_message = (message.replace('&', '&amp;')
+                              .replace('<', '&lt;')
+                              .replace('>', '&gt;')
+                              .replace('"', '&quot;'))
+        
         r = requests.post(url, json={
             "chat_id": CHANNEL_ID,
-            "text": message,
-            "parse_mode": "HTML"
+            "text": safe_message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
         }, timeout=10)
         r.raise_for_status()
         log(f"[TELEGRAM] Message envoyé (status={r.status_code})")
         return True
     except requests.exceptions.RequestException as e:
         log(f"[ERROR TELEGRAM] Erreur d'envoi: {e}")
-        return False
+        # Essayer sans HTML en fallback
+        try:
+            r = requests.post(url, json={
+                "chat_id": CHANNEL_ID,
+                "text": message[:4090],  # Limite Telegram
+                "parse_mode": None
+            }, timeout=10)
+            log(f"[TELEGRAM Fallback] status={r.status_code}")
+            return r.status_code == 200
+        except:
+            return False
 
 def get_matches_today(league: str) -> List[Dict]:
     """Get today's matches for a specific league"""
@@ -188,105 +230,251 @@ def get_team_form(team_id: str, league: str) -> TeamForm:
     
     return TeamForm(wins, draws, losses, gf, ga, matches_analyzed)
 
-# ================= DEEPSEEK ANALYSIS =================
+# ================= LOCAL ANALYSIS (INTELLIGENT FALLBACK) =================
+def analyze_match_locally(
+    home_team: str,
+    away_team: str,
+    home_form: TeamForm,
+    away_form: TeamForm,
+    league: str
+) -> Tuple[str, float, str, str]:
+    """
+    Analyse locale intelligente basée sur les statistiques
+    Retourne: (prediction, confidence, analysis_text, probable_score)
+    """
+    
+    is_home_big = home_team in BIG_TEAMS
+    is_away_big = away_team in BIG_TEAMS
+    is_champions = "champions" in league
+    
+    # Calcul des forces de base
+    home_strength = (
+        home_form.points_per_game * WEIGHTS["form_recent"] +
+        home_form.goal_difference_per_game * WEIGHTS["goals_difference"] +
+        (WEIGHTS["home_advantage"] if not is_champions else WEIGHTS["home_advantage"] * 0.9) +
+        (WEIGHTS["big_team"] if is_home_big else 0)
+    )
+    
+    away_strength = (
+        away_form.points_per_game * WEIGHTS["form_recent"] +
+        away_form.goal_difference_per_game * WEIGHTS["goals_difference"] +
+        (WEIGHTS["big_team"] if is_away_big else 0)
+    )
+    
+    # Calcul des attaques/défenses attendues
+    home_attack = home_form.attack_strength
+    home_defense = home_form.defense_strength
+    away_attack = away_form.attack_strength
+    away_defense = away_form.defense_strength
+    
+    # Buts attendus (formule Poisson simplifiée)
+    expected_home_goals = max(0.1, (home_attack + away_defense) / 2)
+    expected_away_goals = max(0.1, (away_attack + home_defense) / 2)
+    
+    # Probabilités des résultats
+    # Victoire domicile
+    if home_strength > away_strength * 1.3:
+        prediction = "home_win"
+        base_confidence = 7.5 + min(2.0, (home_strength - away_strength) * 2)
+    elif away_strength > home_strength * 1.3:
+        prediction = "away_win"
+        base_confidence = 7.5 + min(2.0, (away_strength - home_strength) * 2)
+    else:
+        # Match équilibré
+        diff = abs(home_strength - away_strength)
+        if diff < 0.5:
+            prediction = "draw"
+            base_confidence = 6.0
+        elif home_strength > away_strength:
+            prediction = "home_win"
+            base_confidence = 6.5
+        else:
+            prediction = "away_win"
+            base_confidence = 6.5
+    
+    # Ajustement Champions League (moins de nuls)
+    if is_champions and prediction == "draw":
+        base_confidence *= 0.8
+        # Réévaluer si très équilibré
+        if home_strength > away_strength:
+            prediction = "home_win"
+            base_confidence = 6.0
+        else:
+            prediction = "away_win"
+            base_confidence = 6.0
+    
+    # Score probable
+    if prediction == "home_win":
+        home_score = int(round(expected_home_goals + 0.3))
+        away_score = int(round(expected_away_goals - 0.2))
+        score = f"{max(1, home_score)}-{max(0, away_score)}"
+    elif prediction == "away_win":
+        home_score = int(round(expected_home_goals - 0.2))
+        away_score = int(round(expected_away_goals + 0.3))
+        score = f"{max(0, home_score)}-{max(1, away_score)}"
+    else:
+        home_score = int(round(expected_home_goals))
+        away_score = int(round(expected_away_goals))
+        score = f"{home_score}-{away_score}"
+    
+    # Éviter les scores improbables
+    if home_score > 5: home_score = 5
+    if away_score > 5: away_score = 5
+    score = f"{home_score}-{away_score}"
+    
+    # Génération de l'analyse textuelle
+    analysis_parts = []
+    
+    if home_form.matches_analyzed >= 3:
+        form_desc = []
+        if home_form.wins > 2:
+            form_desc.append("excellente forme")
+        elif home_form.wins >= 1:
+            form_desc.append("bonne forme")
+        else:
+            form_desc.append("forme difficile")
+        
+        if away_form.wins > 2:
+            form_desc.append("excellente forme")
+        elif away_form.wins >= 1:
+            form_desc.append("bonne forme")
+        else:
+            form_desc.append("forme difficile")
+        
+        if form_desc:
+            analysis_parts.append(f"Forme: {home_team} en {form_desc[0]}, {away_team} en {form_desc[1]}.")
+    
+    if is_home_big or is_away_big:
+        big_teams = []
+        if is_home_big:
+            big_teams.append(home_team)
+        if is_away_big:
+            big_teams.append(away_team)
+        analysis_parts.append(f"Grosse(s) équipe(s): {', '.join(big_teams)}.")
+    
+    goal_diff = home_form.gf - home_form.ga - (away_form.gf - away_form.ga)
+    if abs(goal_diff) > 5:
+        analysis_parts.append("Différence de buts significative en faveur du " + 
+                            ("domicile" if goal_diff > 0 else "extérieur"))
+    
+    # Analyse spécifique selon la prédiction
+    if prediction == "home_win":
+        analysis_parts.append(f"Avantage domicile et supériorité statistique pour {home_team}.")
+    elif prediction == "away_win":
+        analysis_parts.append(f"{away_team} montre des arguments pour l'emporter à l'extérieur.")
+    else:
+        analysis_parts.append("Match très équilibré, nul probable.")
+    
+    analysis_text = " ".join(analysis_parts)
+    if not analysis_text:
+        analysis_text = f"Match {league} entre {home_team} et {away_team}. Données statistiques analysées."
+    
+    # Confiance finale (entre 4 et 9)
+    confidence = max(4.0, min(9.0, base_confidence))
+    
+    return prediction, confidence, analysis_text, score
+
+# ================= DEEPSEEK ANALYSIS (OPTIONNEL) =================
 def analyze_match_with_deepseek(
     home_team: str,
     away_team: str,
     home_form: TeamForm,
     away_form: TeamForm,
-    league: str,
-    is_home_big: bool,
-    is_away_big: bool
-) -> Tuple[str, float, str]:
-    """Analyze match using DeepSeek API"""
+    league: str
+) -> Tuple[str, float, str, str]:
+    """Analyze match using DeepSeek API (if available)"""
     
-    # Initialiser le client DeepSeek
-    client = OpenAI(
-        api_key=DEEPSEEK_API_KEY,
-        base_url="https://api.deepseek.com"
-    )
-    
-    # Préparer le prompt
-    prompt = f"""
-    Tu es un expert en analyse footballistique. Analyse ce match et donne:
-    1. Un pronostic: "home_win", "away_win", ou "draw"
-    2. Un score de confiance de 1 à 10 (10 étant le plus sûr)
-    3. Une analyse courte en français (max 2 phrases)
-    
-    MATCH À ANALYSER:
-    - Équipe domicile: {home_team} {'(Grosse équipe)' if is_home_big else ''}
-    - Équipe extérieure: {away_team} {'(Grosse équipe)' if is_away_big else ''}
-    - Ligue: {league}
-    
-    FORME RÉCENTE (5 derniers matchs):
-    {home_team}: {home_form.wins}V, {home_form.draws}N, {home_form.losses}D. Buts: {home_form.gf} pour, {home_form.ga} contre.
-    {away_team}: {away_form.wins}V, {away_form.draws}N, {away_form.losses}D. Buts: {away_form.gf} pour, {away_form.ga} contre.
-    
-    Considère:
-    - L'avantage domicile
-    - La forme récente
-    - La différence de buts
-    - Le statut de "grosse équipe"
-    - Le type de ligue
-    
-    Réponds EXACTEMENT dans ce format:
-    PRONOSTIC: [home_win/away_win/draw]
-    CONFIDENCE: [nombre de 1 à 10]
-    ANALYSE: [ton analyse en français]
-    """
+    if not DEEPSEEK_API_KEY:
+        return analyze_match_locally(home_team, away_team, home_form, away_form, league)
     
     try:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url="https://api.deepseek.com"
+        )
+        
+        prompt = f"""
+        Analyse ce match de football et donne:
+        1. PRONOSTIC: home_win / away_win / draw
+        2. CONFIDENCE: score de 1 à 10
+        3. SCORE: score probable (ex: 2-1)
+        4. ANALYSE: analyse courte en français
+        
+        Match: {home_team} vs {away_team}
+        Ligue: {league}
+        
+        Forme {home_team} (5 derniers): {home_form.wins}V, {home_form.draws}N, {home_form.losses}D
+        Buts: {home_form.gf} pour, {home_form.ga} contre
+        
+        Forme {away_team} (5 derniers): {away_form.wins}V, {away_form.draws}N, {away_form.losses}D
+        Buts: {away_form.gf} pour, {away_form.ga} contre
+        
+        Grosse équipe: {home_team in BIG_TEAMS} / {away_team in BIG_TEAMS}
+        
+        Réponds exactement dans ce format:
+        PRONOSTIC: ...
+        CONFIDENCE: ...
+        SCORE: ...
+        ANALYSE: ...
+        """
+        
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "Tu es un analyste footballistique expert. Réponds toujours dans le format demandé."},
+                {"role": "system", "content": "Expert en analyse footballistique. Sois concis et précis."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=300
+            max_tokens=200
         )
         
-        result_text = response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+        lines = result.split('\n')
         
-        # Parser la réponse
-        lines = result_text.split('\n')
-        prediction = ""
+        prediction = "draw"
         confidence = 5.0
-        analysis = "Analyse non disponible"
+        score = "1-1"
+        analysis = "Analyse IA"
         
         for line in lines:
             if line.startswith("PRONOSTIC:"):
-                prediction = line.replace("PRONOSTIC:", "").strip().lower()
+                pred = line.replace("PRONOSTIC:", "").strip().lower()
+                if pred in ["home_win", "away_win", "draw"]:
+                    prediction = pred
             elif line.startswith("CONFIDENCE:"):
                 try:
-                    confidence = float(line.replace("CONFIDENCE:", "").strip())
-                    confidence = max(1.0, min(10.0, confidence))
+                    conf = float(line.replace("CONFIDENCE:", "").strip())
+                    confidence = max(1.0, min(10.0, conf))
                 except:
-                    confidence = 5.0
+                    pass
+            elif line.startswith("SCORE:"):
+                score = line.replace("SCORE:", "").strip()
             elif line.startswith("ANALYSE:"):
                 analysis = line.replace("ANALYSE:", "").strip()
         
-        return prediction, confidence, analysis
+        return prediction, confidence, analysis, score
         
     except Exception as e:
-        log(f"[ERROR DEEPSEEK] {e}")
-        # Fallback en cas d'erreur
-        return "draw", 5.0, "Erreur d'analyse avec l'IA"
+        log(f"[WARN] DeepSeek non disponible: {e}")
+        # Fallback sur l'analyse locale
+        return analyze_match_locally(home_team, away_team, home_form, away_form, league)
 
 def calculate_odds(prediction: str, confidence: float, home_big: bool, away_big: bool) -> float:
-    """Calculate odds based on prediction and confidence"""
-    base_odds = 10.0 / confidence
+    """Calculate realistic odds"""
+    # Base odds: plus la confiance est haute, plus la cote est basse
+    base_odds = 11.0 - confidence  # Si confiance=7 → cote=4.0
     
     # Ajustements
     if prediction == "home_win" and home_big:
-        base_odds *= 0.8
+        base_odds *= 0.7  # Grosse équipe favorite → cote plus basse
     elif prediction == "away_win" and away_big:
-        base_odds *= 0.8
+        base_odds *= 0.7
     elif prediction == "draw":
-        base_odds *= 1.2
+        base_odds *= 1.3  # Les nuls ont souvent des cotes plus élevées
     
-    # Assurer des cotes réalistes
-    odds = max(1.5, min(10.0, round(base_odds, 2)))
+    # Limites réalistes
+    odds = max(1.5, min(8.0, round(base_odds, 2)))
     return odds
 
 def predict_match(
@@ -296,18 +484,21 @@ def predict_match(
     away_form: TeamForm,
     league: str
 ) -> MatchPrediction:
-    """Create match prediction using DeepSeek"""
+    """Create match prediction"""
     
+    # Utiliser DeepSeek si disponible, sinon analyse locale
+    if DEEPSEEK_API_KEY:
+        prediction, confidence, analysis, score = analyze_match_with_deepseek(
+            home_team, away_team, home_form, away_form, league
+        )
+    else:
+        prediction, confidence, analysis, score = analyze_match_locally(
+            home_team, away_team, home_form, away_form, league
+        )
+    
+    # Calcul des cotes
     is_home_big = home_team in BIG_TEAMS
     is_away_big = away_team in BIG_TEAMS
-    
-    # Analyser avec DeepSeek
-    prediction, confidence, analysis = analyze_match_with_deepseek(
-        home_team, away_team, home_form, away_form,
-        league, is_home_big, is_away_big
-    )
-    
-    # Calculer les cotes
     odds = calculate_odds(prediction, confidence, is_home_big, is_away_big)
     
     # Format de la ligue
@@ -323,8 +514,9 @@ def predict_match(
         prediction=prediction,
         confidence=confidence,
         odds=odds,
-        analysis_text=analysis,
-        league=league_name
+        analysis_text=analysis[:200],  # Limiter la longueur
+        league=league_name,
+        score_probable=score
     )
 
 # ================= DIVERSIFICATION =================
@@ -334,27 +526,31 @@ def diversify_predictions(predictions: List[MatchPrediction]) -> List[MatchPredi
         return predictions
     
     draw_count = sum(1 for p in predictions if p.prediction == "draw")
-    max_draws = max(1, len(predictions) // 3)
+    max_draws = max(1, len(predictions) // 3)  # Max 33% de nuls
     
     if draw_count <= max_draws:
         return predictions
     
-    # Convertir quelques nuls en victoires
-    sorted_preds = sorted(predictions, key=lambda x: x.confidence, reverse=True)
-    for i, pred in enumerate(sorted_preds):
+    # Trier par confiance (les moins confiants en premier pour modification)
+    sorted_preds = sorted(predictions, key=lambda x: x.confidence)
+    
+    for pred in sorted_preds:
         if pred.prediction == "draw" and draw_count > max_draws:
             # Changer en victoire domicile (simplifié)
             pred.prediction = "home_win"
-            pred.confidence *= 0.9  # Réduire légèrement la confiance
-            pred.odds = calculate_odds("home_win", pred.confidence, 
-                                      pred.home_team in BIG_TEAMS, 
-                                      pred.away_team in BIG_TEAMS)
+            pred.confidence *= 0.85  # Réduire la confiance après modification
+            # Recalculer la cote
+            is_home_big = pred.home_team in BIG_TEAMS
+            is_away_big = pred.away_team in BIG_TEAMS
+            pred.odds = calculate_odds("home_win", pred.confidence, is_home_big, is_away_big)
+            pred.analysis_text = "Match initialement équilibré, léger avantage domicile."
+            pred.score_probable = "1-0"
             draw_count -= 1
         
         if draw_count <= max_draws:
             break
     
-    return sorted_preds
+    return predictions
 
 # ================= FORMATTING =================
 def format_combo_message(title: str, predictions: List[MatchPrediction], risk_level: str) -> str:
@@ -362,9 +558,12 @@ def format_combo_message(title: str, predictions: List[MatchPrediction], risk_le
     if not predictions:
         return f"<b>{title}</b>\n\nAucun pronostic {risk_level} aujourd'hui."
     
+    source = "DeepSeek AI" if DEEPSEEK_API_KEY else "Analyse Statistique"
+    
     message = f"<b>{title}</b>\n"
     message += f"📅 {datetime.date.today().strftime('%d/%m/%Y')}\n"
-    message += f"🤖 Analyse par IA DeepSeek\n\n"
+    message += f"🤖 {source}\n"
+    message += f"🎯 {len(predictions)} sélection(s)\n\n"
     
     total_odds = 1.0
     
@@ -373,47 +572,47 @@ def format_combo_message(title: str, predictions: List[MatchPrediction], risk_le
         
         # Emoji selon le pronostic
         if pred.prediction == "draw":
-            outcome_emoji = "⚖️"
+            outcome_emoji = "⚖️ NUL"
         elif pred.prediction == "home_win":
-            outcome_emoji = "🏠"
+            outcome_emoji = "🏠 DOMICILE"
         else:
-            outcome_emoji = "✈️"
+            outcome_emoji = "✈️ EXTERIEUR"
         
         # Étoiles de confiance
         stars = min(5, int(pred.confidence / 2))
         conf_bars = "★" * stars + "☆" * (5 - stars)
         
+        # Message court
         message += (
-            f"{i}. <b>{pred.home_team} vs {pred.away_team}</b>\n"
-            f"   {outcome_emoji} <b>{pred.get_pick_text()}</b>\n"
-            f"   🏆 {pred.league} | 📊 {conf_bars} ({pred.confidence:.1f}/10)\n"
-            f"   💰 Cote: <b>{pred.odds}</b>\n"
-            f"   📝 {pred.analysis_text}\n\n"
+            f"{i}. <b>{pred.home_team} - {pred.away_team}</b>\n"
+            f"   {outcome_emoji} | {conf_bars} ({pred.confidence:.1f}/10)\n"
+            f"   📊 {pred.league} | 🎯 {pred.score_probable} | 💰 <b>{pred.odds}</b>\n"
+            f"   <i>{pred.analysis_text[:80]}...</i>\n\n"
         )
     
     # Calcul de la mise recommandée
     if risk_level == "MEDIUM":
-        stake = min(10, max(2, round(20 / total_odds, 2)))
+        stake = min(15, max(3, round(25 / total_odds, 2)))
     else:
-        stake = min(5, max(1, round(10 / total_odds, 2)))
+        stake = min(8, max(1, round(15 / total_odds, 2)))
     
     potential_win = round(stake * total_odds, 2)
+    roi = round((potential_win - stake) / stake * 100, 1)
     
     message += (
-        f"📈 <b>RÉSUMÉ</b>\n"
-        f"├ Matchs: {len(predictions)}\n"
-        f"├ Cote totale: <b>{round(total_odds, 2)}</b>\n"
-        f"├ Mise conseillée: <b>{stake}€</b>\n"
-        f"└ Gain possible: <b>{potential_win}€</b>\n\n"
-        f"<i>⚠️ Paris sportifs = risques. Jouez responsablement.</i>"
+        f"<b>📈 RÉCAPITULATIF</b>\n"
+        f"• Cote combinée: <b>{round(total_odds, 2)}</b>\n"
+        f"• Mise conseillée: <b>{stake}€</b>\n"
+        f"• Gain potentiel: <b>{potential_win}€</b> (+{roi}%)\n\n"
+        f"<i>⚠️ Paris responsables | Résultats basés sur analyse statistique</i>"
     )
     
     return message
 
 # ================= MAIN =================
 def main():
-    log("🚀 Bot de pronostics avec DeepSeek IA démarré")
-    send_telegram("🤖 <b>Bot Pronostics IA activé</b>\nAnalyse des matchs en cours...")
+    log("🚀 Bot de pronostics avancé démarré")
+    send_telegram("🤖 <b>Bot Pronostics activé</b>\nAnalyse en cours...")
     
     all_predictions = []
     
@@ -450,7 +649,7 @@ def main():
                 home_form = get_team_form(home_id, league)
                 away_form = get_team_form(away_id, league)
                 
-                # Générer la prédiction avec DeepSeek
+                # Générer la prédiction
                 prediction = predict_match(home_team, away_team, home_form, away_form, league)
                 all_predictions.append(prediction)
                 
@@ -460,45 +659,52 @@ def main():
                 log(f"[ERROR] Traitement match: {e}")
                 continue
     
+    if not all_predictions:
+        log("❌ Aucun match à analyser aujourd'hui")
+        send_telegram("ℹ️ <b>Aucun match programmé aujourd'hui</b> dans les ligues suivies.")
+        return
+    
     # Trier par confiance
     all_predictions.sort(key=lambda x: x.confidence, reverse=True)
     
-    # Sélectionner les pronostics MEDIUM (meilleure confiance)
-    medium_predictions = [p for p in all_predictions if p.confidence >= 6.5][:3]
+    # Sélectionner les pronostics MEDIUM (confiance >= 6.0)
+    medium_predictions = [p for p in all_predictions if p.confidence >= 6.0][:3]
     
-    # Sélectionner les pronostics RISK (avec diversification)
-    remaining = [p for p in all_predictions if p not in medium_predictions and p.confidence >= 5.0]
+    # Sélectionner les pronostics RISK (confiance >= 4.5)
+    remaining = [p for p in all_predictions if p not in medium_predictions and p.confidence >= 4.5]
     risk_predictions = remaining[:5]
     risk_predictions = diversify_predictions(risk_predictions)
     
     # Envoyer les messages Telegram
     if medium_predictions:
         send_telegram(format_combo_message("🔵 COMBINÉ SÉCURISÉ", medium_predictions, "MEDIUM"))
+        log(f"✅ {len(medium_predictions)} pronostic(s) MEDIUM envoyé(s)")
     else:
-        send_telegram("ℹ️ <b>Aucun pronostic sécurisé aujourd'hui</b>\n(Confiance insuffisante: < 6.5/10)")
+        send_telegram("ℹ️ <b>Aucun pronostic sécurisé aujourd'hui</b>\n(Seuil de confiance: ≥6.0/10)")
+        log("⚠️ Aucun pronostic MEDIUM (confiance < 6.0)")
     
     if risk_predictions:
         send_telegram(format_combo_message("🔴 COMBINÉ RISK", risk_predictions, "RISK"))
+        log(f"✅ {len(risk_predictions)} pronostic(s) RISK envoyé(s)")
     else:
-        send_telegram("ℹ️ <b>Aucun pronostic risk aujourd'hui</b>\n(Confiance insuffisante: < 5.0/10)")
+        send_telegram("ℹ️ <b>Aucun pronostic risk aujourd'hui</b>\n(Seuil de confiance: ≥4.5/10)")
+        log("⚠️ Aucun pronostic RISK (confiance < 4.5)")
     
     # Statistiques
-    if all_predictions:
-        avg_conf = statistics.mean([p.confidence for p in all_predictions])
-    else:
-        avg_conf = 0
+    avg_conf = statistics.mean([p.confidence for p in all_predictions]) if all_predictions else 0
     
     stats_msg = (
-        f"📊 <b>STATISTIQUES JOUR</b>\n"
+        f"📊 <b>STATISTIQUES DU JOUR</b>\n"
         f"├ Matchs analysés: {len(all_predictions)}\n"
         f"├ Pronostics sécurisés: {len(medium_predictions)}\n"
         f"├ Pronostics risk: {len(risk_predictions)}\n"
-        f"└ Confiance moyenne: {avg_conf:.1f}/10\n\n"
-        f"🔍 Analyse par: DeepSeek AI"
+        f"├ Confiance moyenne: {avg_conf:.1f}/10\n"
+        f"└ Source: {'DeepSeek AI' if DEEPSEEK_API_KEY else 'Analyse Statistique'}\n\n"
+        f"🔄 Prochaine analyse demain."
     )
     send_telegram(stats_msg)
     
-    log(f"✅ Terminé! {len(medium_predictions)} MEDIUM, {len(risk_predictions)} RISK")
+    log(f"✅ Analyse terminée! {len(all_predictions)} match(s) analysé(s)")
 
 if __name__ == "__main__":
     main()

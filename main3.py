@@ -129,8 +129,11 @@ def main():
     leagues = fetch_all_leagues()
 
     for league in leagues:
-        league_name = league["LeagueName"]
-        league_shortcut = league["LeagueShortcut"]
+        # Utiliser .get pour éviter KeyError
+        league_name = league.get("LeagueName") or league.get("LeagueShortName") or league.get("LeagueShortcut")
+        league_shortcut = league.get("LeagueShortcut") or league.get("LeagueId")
+        if not league_name or not league_shortcut:
+            continue  # On saute les ligues non valides
 
         try:
             all_matches = fetch_all_matches(league_shortcut)

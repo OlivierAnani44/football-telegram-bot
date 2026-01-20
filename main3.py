@@ -1,12 +1,13 @@
 import os
 import requests
+from datetime import datetime, timedelta
 
 # =============================
-# VARIABLES D'ENVIRONNEMENT
+# VARIABLES ENVIRONNEMENT
 # =============================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
-LEAGUE = "eng.1"  # Exemple : Premier League, changeable
+LEAGUE = "eng.1"  # Premier League
 
 if not BOT_TOKEN or not CHANNEL_ID:
     raise RuntimeError("BOT_TOKEN ou CHANNEL_ID manquant")
@@ -16,76 +17,52 @@ if not BOT_TOKEN or not CHANNEL_ID:
 # =============================
 def send_to_telegram(msg: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHANNEL_ID,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    response = requests.post(url, data=payload)
-    if response.status_code != 200:
-        print("Erreur Telegram:", response.text)
-    else:
-        print("Message envoyé:", msg[:50], "...")
+    payload = {"chat_id": CHANNEL_ID, "text": msg, "parse_mode": "HTML"}
+    requests.post(url, data=payload)
 
 # =============================
-# FONCTION SCORES
+# RÉCUPÉRER LES MATCHS D’UNE DATE
 # =============================
-def get_scores():
-    url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{LEAGUE}/scoreboard"
+def get_matches_by_date(date_str):
+    url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{LEAGUE}/scoreboard?dates={date_str}"
     res = requests.get(url).json()
-    events = res.get("events", [])
-    if not events:
-        print("Aucun match trouvé")
-        return
-
-    for match in events:
-        comp = match["competitions"][0]
-        home = comp["competitors"][0]["team"]["shortDisplayName"]
-        away = comp["competitors"][1]["team"]["shortDisplayName"]
-        score_home = comp["competitors"][0]["score"]
-        score_away = comp["competitors"][1]["score"]
-        status = comp["status"]["type"]["shortDetail"]
-        msg = f"⚽ {home} vs {away}\nScore: {score_home}-{score_away}\nStatut: {status}"
-        send_to_telegram(msg)
+    return res.get("events", [])
 
 # =============================
-# FONCTION NEWS
-# =============================
-def get_news():
-    url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{LEAGUE}/news"
-    res = requests.get(url).json()
-    articles = res.get("articles", [])
-    for article in articles[:5]:  # 5 dernières news
-        title = article["headline"]
-        link = article["links"]["web"]["href"]
-        send_to_telegram(f"📰 {title}\n{link}")
-
-# =============================
-# FONCTION STATS MATCH (OPTIONNELLE)
+# RÉCUPÉRER LES STATS D’UN MATCH
 # =============================
 def get_match_stats(gameId):
     url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{LEAGUE}/summary?event={gameId}"
     res = requests.get(url).json()
-    comp = res.get("header", {})
-    home = comp.get("competitors", [])[0]["team"]["displayName"]
-    away = comp.get("competitors", [])[1]["team"]["displayName"]
-    score_home = comp.get("competitors", [])[0]["score"]
-    score_away = comp.get("competitors", [])[1]["score"]
+    comp = res.get("header", {}).get("competitions", [])[0]
+    home = comp["competitors"][0]["team"]["displayName"]
+    away = comp["competitors"][1]["team"]["displayName"]
+    score_home = comp["competitors"][0]["score"]
+    score_away = comp["competitors"][1]["score"]
 
-    stats = res.get("boxscore", {}).get("teams", [])
-    home_stats = stats[0] if len(stats) > 0 else {}
-    away_stats = stats[1] if len(stats) > 1 else {}
+    # Boxscore stats
+    stats_list = res.get("boxscore", {}).get("teams", [])
+    home_stats = stats_list[0]["statistics"] if len(stats_list) > 0 else {}
+    away_stats = stats_list[1]["statistics"] if len(stats_list) > 1 else {}
 
-    shots_home = home_stats.get("statistics", {}).get("shots", "-")
-    shots_away = away_stats.get("statistics", {}).get("shots", "-")
-    possession_home = home_stats.get("statistics", {}).get("possession", "-")
-    possession_away = away_stats.get("statistics", {}).get("possession", "-")
+    # Extraire certaines stats clés
+    def get_stat(stats, name):
+        for s in stats:
+            if s.get("name") == name:
+                return s.get("value")
+        return "-"
+
+    shots_home = get_stat(home_stats, "Shots")
+    shots_away = get_stat(away_stats, "Shots")
+    possession_home = get_stat(home_stats, "Possession")
+    possession_away = get_stat(away_stats, "Possession")
+    corners_home = get_stat(home_stats, "Corners")
+    corners_away = get_stat(away_stats, "Corners")
 
     msg = (
-        f"📊 {home} vs {away}\n"
+        f"⚽ <b>{home} vs {away}</b>\n"
         f"Score: {score_home}-{score_away}\n"
-        f"Tirs: {shots_home}-{shots_away} | Possession: {possession_home}-{possession_away}%"
+        f"Tirs: {shots_home}-{shots_away} | Possession: {possession_home}-{possession_away}% | Corners: {corners_home}-{corners_away}"
     )
     send_to_telegram(msg)
 
@@ -93,14 +70,19 @@ def get_match_stats(gameId):
 # MAIN
 # =============================
 def main():
-    print("Récupération des scores...")
-    get_scores()
-    print("Récupération des news...")
-    get_news()
+    # Date de demain
+    tomorrow = datetime.utcnow() + timedelta(days=1)
+    date_str = tomorrow.strftime("%Y%m%d")
 
-    # Exemple de stats match : utiliser un gameId valide
-    # gameId = "1234567"
-    # get_match_stats(gameId)
+    matches = get_matches_by_date(date_str)
+    if not matches:
+        send_to_telegram(f"Aucun match trouvé pour demain ({date_str})")
+        return
+
+    for match in matches:
+        gameId = match.get("id")
+        if gameId:
+            get_match_stats(gameId)
 
 if __name__ == "__main__":
     main()

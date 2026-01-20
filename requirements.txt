@@ -13,3 +13,4 @@ twilio==9.0.0
 googletrans
 deep-translator==1.10.1
 understatapi
+openai

@@ -1,16 +1,18 @@
-import requests
-import datetime
 import os
 import sys
+import requests
+import datetime
 
-# ================= ENV =================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-BOT_TOKEN = os.getenv("BOT TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL ID")
+print("DEBUG BOT_TOKEN:", "OK" if BOT_TOKEN else "MANQUANT")
+print("DEBUG CHANNEL_ID:", "OK" if CHANNEL_ID else "MANQUANT")
 
 if not BOT_TOKEN or not CHANNEL_ID:
-    print("❌ Variables BOT TOKEN ou CHANNEL ID manquantes")
+    print("❌ Variables BOT_TOKEN ou CHANNEL_ID manquantes")
     sys.exit(1)
+
 
 # ================= CONFIG =================
 

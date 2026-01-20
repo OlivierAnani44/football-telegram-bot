@@ -1,99 +1,101 @@
 import os
-import asyncio
-import httpx
-import json
-from datetime import date
+import requests
+from bs4 import BeautifulSoup
+import datetime
+import feedparser
 
-SPORTMONKS_TOKEN = os.getenv("SPORTMONKS_TOKEN")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# ===============================
+# VARIABLES ENVIRONNEMENT (Railway)
+# ===============================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = os.environ.get("CHANNEL_ID")
 
-POSTED_FILE = "posted.json"
+if not BOT_TOKEN or not CHANNEL_ID:
+    raise ValueError("⚠️ BOT_TOKEN ou CHANNEL_ID non définis dans les variables d'environnement.")
 
-def load_posted():
-    if os.path.exists(POSTED_FILE):
-        with open(POSTED_FILE, "r") as f:
-            return json.load(f)
-    return []
+# ===============================
+# CONFIGURATION
+# ===============================
+rss_feed_url_list = [
+    "https://fbref.com/en/comps/12/La-Liga-Stats"  # Exemple de flux RSS FBref
+]
+max_entries = 5  # nombre d'articles à poster
 
-def save_posted(data):
-    with open(POSTED_FILE, "w") as f:
-        json.dump(data, f)
+# ===============================
+# FONCTION : GENERER RSS LOCAL
+# ===============================
+def generate_rss_fbref(url):
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; RSSBot/1.0)"}
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        print("Erreur téléchargement FBref:", r.status_code)
+        return None
 
-async def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as c:
-        await c.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML"
-        })
+    soup = BeautifulSoup(r.text, "html.parser")
+    title = soup.title.string if soup.title else "La Liga Stats FBref"
+    snippet = f"Statistiques extraites le {datetime.datetime.utcnow().isoformat()}"
 
-async def send_photo(photo_url, caption=""):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    async with httpx.AsyncClient() as c:
-        await c.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "photo": photo_url,
-            "caption": caption,
-            "parse_mode": "HTML"
-        })
+    pubdate = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+    rss_item = f"""
+    <item>
+      <title>{title}</title>
+      <link>{url}</link>
+      <description><![CDATA[{snippet}]]></description>
+      <pubDate>{pubdate}</pubDate>
+    </item>
+    """
 
-async def sportmonks_get(endpoint):
-    url = f"https://api.sportmonks.com/v3/football/{endpoint}"
-    params = {"api_token": SPORTMONKS_TOKEN}
-    async with httpx.AsyncClient() as c:
-        r = await c.get(url, params=params)
-        r.raise_for_status()
-        return r.json()
+    rss_feed = f"""<?xml version="1.0" encoding="UTF-8" ?>
+    <rss version="2.0">
+      <channel>
+        <title>FBref La Liga Stats</title>
+        <link>{url}</link>
+        <description>Flux RSS généré automatiquement pour les stats La Liga</description>
+        <lastBuildDate>{pubdate}</lastBuildDate>
+        {rss_item}
+      </channel>
+    </rss>
+    """
 
-async def post_matches_today():
-    posted = load_posted()
-    today_str = date.today().isoformat()
+    return rss_feed
 
-    try:
-        data = await sportmonks_get(f"fixtures/date/{today_str}?include=participants,events,scores")
-    except httpx.HTTPStatusError as e:
-        await send_telegram(f"⚠️ SportMonks error: {e.response.status_code}")
-        return
+# ===============================
+# FONCTION : ENVOYER MESSAGE TELEGRAM
+# ===============================
+def send_to_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    r = requests.post(url, data=payload)
+    if r.status_code != 200:
+        print("Erreur Telegram:", r.text)
+    else:
+        print("Message envoyé avec succès.")
 
-    fixtures = data.get("data", [])
-    if not fixtures:
-        await send_telegram(f"📅 Aucun match trouvé pour {today_str}")
-        return
+# ===============================
+# FONCTION : LIRE RSS ET POSTER
+# ===============================
+def read_rss_and_post(rss_feed):
+    feed = feedparser.parse(rss_feed)
+    entries = feed.entries[:max_entries]
+    for entry in entries:
+        msg = f"<b>{entry.title}</b>\n{entry.description}\n{entry.link}"
+        send_to_telegram(msg)
 
-    for match in fixtures:
-        mid = match["id"]
-        if mid in posted:
-            continue
-
-        name = match.get("name") or ""
-        start = match.get("starting_at") or ""
-        state_id = match.get("state_id", 0)
-
-        scores = match.get("scores", {})
-        sh = scores.get("localteam_score", "-")
-        sa = scores.get("visitorteam_score", "-")
-
-        msg = f"⚽ {name} \n🕒 {start}\nScore: {sh}-{sa}"
-        await send_telegram(msg)
-
-        # highlights/events
-        events = match.get("events", [])
-        for ev in events:
-            if ev.get("type") == "goal":
-                video = ev.get("video") or ev.get("details", {}).get("media_url")
-                if video:
-                    await send_photo(video, caption=f"🎯 But: {name}")
-
-        posted.append(mid)
-
-    save_posted(posted)
-
-async def main_loop():
-    while True:
-        await post_matches_today()
-        await asyncio.sleep(600)  # toutes les 10 minutes
+# ===============================
+# PROGRAMME PRINCIPAL
+# ===============================
+def main():
+    for rss_url in rss_feed_url_list:
+        print(f"Traitement du flux : {rss_url}")
+        rss_feed = generate_rss_fbref(rss_url)
+        if rss_feed:
+            read_rss_and_post(rss_feed)
+        else:
+            print("Impossible de générer le RSS pour", rss_url)
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    main()

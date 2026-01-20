@@ -20,10 +20,9 @@ def send_to_telegram(message: str):
     requests.post(url, data=payload, timeout=15)
 
 # =============================
-# ESPN - TOP LIGUES & CHAMPIONS LEAGUE
+# ESPN - TOP LIGUES + CL
 # =============================
 ESPN_BASE = "http://site.api.espn.com/apis/site/v2/sports"
-
 TOP_LEAGUES = {
     "Champions League": "soccer/uefa.champions",
     "Premier League": "soccer/eng.1",
@@ -34,7 +33,7 @@ TOP_LEAGUES = {
 }
 
 # =============================
-# Récupérer les matchs du jour
+# Récupérer matchs du jour
 # =============================
 def fetch_espn_today_matches(league_api):
     today = datetime.utcnow().strftime("%Y%m%d")
@@ -46,14 +45,13 @@ def fetch_espn_today_matches(league_api):
         return []
 
 # =============================
-# Récupérer les statistiques détaillées d’un match
+# Récupérer stats détaillées
 # =============================
 def fetch_match_stats(league_api, game_id):
     url = f"{ESPN_BASE}/{league_api}/summary?event={game_id}"
     try:
         res = requests.get(url, timeout=20).json()
         stats = {}
-        # Extraire stats principales
         if "boxscore" in res:
             teams = res["boxscore"].get("teams", [])
             for t in teams:
@@ -67,40 +65,54 @@ def fetch_match_stats(league_api, game_id):
         return {}
 
 # =============================
-# Formater message Telegram avec stats
+# Formater message Telegram
 # =============================
 def format_espn_match_message(match, league_api):
     try:
         comp = match["competitions"][0]
         team1 = comp["competitors"][0]["team"]["displayName"]
         team2 = comp["competitors"][1]["team"]["displayName"]
-        score = comp["competitors"][0]["score"] + "-" + comp["competitors"][1]["score"]
+        score = f"{comp['competitors'][0].get('score','0')}-{comp['competitors'][1].get('score','0')}"
 
-        # Récupérer stats détaillées
-        stats = fetch_match_stats(league_api, match["id"])
+        stats_json = fetch_match_stats(league_api, match["id"])
+
+        # Mapping stat → lisible
+        stat_fields = {
+            "shots": "Tirs",
+            "shotsOnGoal": "Tirs cadrés",
+            "possession": "Possession (%)",
+            "corners": "Corners",
+            "fouls": "Fautes",
+            "yellowCards": "Cartons jaunes",
+            "redCards": "Cartons rouges",
+            "offsides": "Hors-jeu",
+            "passes": "Passes",
+            "passAccuracy": "Précision passes (%)",
+            "tackles": "Tacles",
+            "goalAssists": "Passes décisives",
+            "goals": "Buts"
+        }
 
         stats_text = ""
-        if stats:
-            t1_stats = stats.get(team1, {})
-            t2_stats = stats.get(team2, {})
-            all_keys = set(list(t1_stats.keys()) + list(t2_stats.keys()))
-            for k in all_keys:
-                stats_text += f"{k}: {t1_stats.get(k,'N/A')} - {t2_stats.get(k,'N/A')}\n"
+        for field, label in stat_fields.items():
+            val1 = stats_json.get(team1, {}).get(field, "N/A")
+            val2 = stats_json.get(team2, {}).get(field, "N/A")
+            stats_text += f"{label}: {val1} - {val2}\n"
 
         message = f"""
-🏆 {league_api.replace('soccer/', '')}
+🏆 {league_api.replace('soccer/', '').title()}
 ⚽ {team1} vs {team2}
 📊 Score : {score}
 
-📈 Statistiques :
-{stats_text.strip() if stats_text else 'Non disponible'}
+📈 Statistiques détaillées :
+{stats_text.strip()}
 
 🔮 Analyse simple :
-Avantage probable : {'Équilibré' if not stats else 'À définir selon stats'}
+Avantage probable : {'Équilibré' if not stats_json else 'À définir selon stats'}
 """.strip()
         return message
-    except:
-        return None
+    except Exception as e:
+        return f"Erreur format match: {e}"
 
 # =============================
 # MAIN

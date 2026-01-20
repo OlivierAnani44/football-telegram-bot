@@ -1,9 +1,9 @@
 import os
 import requests
-import datetime
+from understatapi import UnderstatClient
 
 # =============================
-# VARIABLES ENVIRONNEMENT
+# VARIABLES D'ENVIRONNEMENT
 # =============================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
@@ -12,84 +12,56 @@ if not BOT_TOKEN or not CHANNEL_ID:
     raise RuntimeError("BOT_TOKEN ou CHANNEL_ID manquant")
 
 # =============================
-# CONFIG
+# FONCTION TELEGRAM
 # =============================
-UNDERSTAT_API_URL = "https://understat.com/league/La_liga/2026"
-MAX_MATCHES = 5
-
-# =============================
-# FETCH MATCHES VIA API
-# =============================
-def fetch_understat_matches():
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-    r = requests.get(UNDERSTAT_API_URL, headers=headers)
-    if r.status_code != 200:
-        print("Erreur Understat:", r.status_code)
-        return []
-
-    # Understat met un script JSON dans "data-react-props"
-    import re, json
-    pattern = re.compile(r"root\.App\.main = (.+);")
-    match = pattern.search(r.text)
-    if not match:
-        print("Impossible de trouver les données JSON")
-        return []
-
-    data_json = json.loads(match.group(1))
-    # Matches sont ici
-    matches = data_json['props']['pageProps']['matches']
-    return matches[:MAX_MATCHES]
-
-# =============================
-# TELEGRAM
-# =============================
-def send_to_telegram(message):
+def send_to_telegram(msg: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
-        "text": message,
-        "parse_mode": "HTML"
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
-    r = requests.post(url, data=payload)
-    if r.status_code != 200:
-        print("Erreur Telegram:", r.text)
-    else:
-        print("Message envoyé:", message[:50], "...")
+    response = requests.post(url, data=payload)
+    if response.status_code != 200:
+        print("Erreur Telegram:", response.text)
 
 # =============================
-# GENERATE MESSAGE
-# =============================
-def generate_message(match):
-    dt = datetime.datetime.fromtimestamp(int(match['datetime']))
-    home = match['h']['title']
-    away = match['a']['title']
-    xG_home = float(match['xG']['h'])
-    xG_away = float(match['xG']['a'])
-    goals_home = match['goals']['h']
-    goals_away = match['goals']['a']
-
-    msg = (
-        f"⚽ <b>{home} vs {away}</b>\n"
-        f"Date UTC: {dt.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Score: {goals_home}-{goals_away}\n"
-        f"xG: {xG_home:.2f}-{xG_away:.2f}"
-    )
-    return msg
-
-# =============================
-# MAIN
+# PROGRAMME PRINCIPAL
 # =============================
 def main():
-    matches = fetch_understat_matches()
-    if not matches:
-        print("Aucun match récupéré")
-        return
+    with UnderstatClient() as client:
+        # 1️⃣ Récupère les matchs de La Liga (dernier match de la saison 2026)
+        league = client.league("La_Liga")
+        matches = league.get_match_data(season="2026")  # récupère tous les matchs de la saison
 
-    for match in matches:
-        msg = generate_message(match)
-        send_to_telegram(msg)
+        if not matches:
+            print("Aucun match récupéré")
+            return
+
+        # 2️⃣ On prend les 5 derniers matchs pour poster sur Telegram
+        latest_matches = matches[-5:]  # les plus récents
+
+        for match in latest_matches:
+            # Extrait les infos utiles
+            date_utc = match["datetime"]
+            home_team = match["h"]["title"]
+            away_team = match["a"]["title"]
+            goals_home = match["goals"]["h"]
+            goals_away = match["goals"]["a"]
+            xG_home = float(match["xG"]["h"])
+            xG_away = float(match["xG"]["a"])
+
+            # Crée le message
+            msg = (
+                f"⚽ <b>{home_team} vs {away_team}</b>\n"
+                f"Date UTC: {date_utc}\n"
+                f"Score: {goals_home}-{goals_away}\n"
+                f"xG: {xG_home:.2f}-{xG_away:.2f}"
+            )
+
+            # 3️⃣ Envoie sur Telegram
+            send_to_telegram(msg)
 
 if __name__ == "__main__":
     main()
